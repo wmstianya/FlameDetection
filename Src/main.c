@@ -77,6 +77,14 @@ typedef enum {
     CALIBRATION_ERROR = 3       // 校准错误（上电时有火焰）
 } FlameStatus_t;
 
+// 采样状态枚举
+typedef enum {
+    SAMPLING_IDLE = 0,          // 空闲状态
+    SAMPLING_INITIAL_CHECK,     // 初始检查采样中
+    SAMPLING_NORMAL,            // 正常采样中
+    SAMPLING_COMPLETE           // 采样完成
+} SamplingState_t;
+
 // 自适应检测状态
 typedef struct {
     uint32_t baseline;                  // 环境基线值(mV)
@@ -91,6 +99,14 @@ typedef struct {
     uint8_t  calibrationRetryCount;     // 校准重试计数
     uint32_t lastCalibrationRetry;      // 上次校准重试时间
     uint8_t  initialStateValid;         // 初始状态是否有效
+    
+    // 新增：采样状态机相关变量
+    SamplingState_t samplingState;      // 当前采样状态
+    uint32_t samplingSum;               // 采样累积和
+    uint16_t samplingCount;             // 当前采样计数
+    uint32_t lastSamplingTime;          // 上次采样时间
+    uint8_t  samplingType;              // 采样类型：0-初始检查，1-正常检测
+    uint32_t samplingResult;            // 采样结果
 } AdaptiveDetector_t;
 /* USER CODE END PD */
 
@@ -152,6 +168,76 @@ static void initializeAdaptiveDetector(void)
     detector.calibrationRetryCount = 0;
     detector.lastCalibrationRetry = 0;
     detector.initialStateValid = 0;
+    
+    // 初始化采样状态机变量
+    detector.samplingState = SAMPLING_IDLE;
+    detector.samplingSum = 0;
+    detector.samplingCount = 0;
+    detector.lastSamplingTime = 0;
+    detector.samplingType = 0;
+    detector.samplingResult = 0;
+}
+
+/**
+ * @brief 非阻塞初始状态检查（状态机实现）
+ * @retval 0-检查中, 1-检查完成且有效, 2-检查完成但无效
+ */
+static uint8_t checkInitialStateNonBlocking(void)
+{
+    uint32_t currentTime = HAL_GetTick();
+    
+    // 如果不在初始检查状态，开始新的检查
+    if(detector.samplingState != SAMPLING_INITIAL_CHECK) {
+        detector.samplingState = SAMPLING_INITIAL_CHECK;
+        detector.samplingSum = 0;
+        detector.samplingCount = 0;
+        detector.samplingType = 0; // 初始检查类型
+        detector.lastSamplingTime = currentTime;
+    }
+    
+    // 检查是否到达采样时间（10ms间隔）
+    if(currentTime - detector.lastSamplingTime >= 10) {
+        // 执行一次采样
+        detector.samplingSum += adc_convert_single();
+        detector.samplingCount++;
+        detector.lastSamplingTime = currentTime;
+        HAL_IWDG_Refresh(&hiwdg);
+        
+        // 检查是否完成所有采样
+        if(detector.samplingCount >= INITIAL_CHECK_SAMPLES) {
+            // 计算平均值
+            uint32_t averageValue = (detector.samplingSum * ADC_REFERENCE_VOLTAGE_MV) / 
+                                   (ADC_RESOLUTION * INITIAL_CHECK_SAMPLES);
+            
+            detector.samplingState = SAMPLING_COMPLETE;
+            
+            // 检查传感器连接状态
+            if(averageValue < SENSOR_DISCONNECT_THRESHOLD) {
+                detector.sensorConnected = 0;
+                return 2; // 检查完成但无效
+            }
+            
+            detector.sensorConnected = 1;
+            
+            // 检查是否在预期的无火焰范围内
+            if(averageValue >= EXPECTED_NO_FLAME_MIN_MV && averageValue <= EXPECTED_NO_FLAME_MAX_MV) {
+                detector.initialStateValid = 1;
+                return 1; // 检查完成且有效
+            }
+            
+            // 如果ADC值过低，可能有火焰
+            if(averageValue < EXPECTED_NO_FLAME_MIN_MV) {
+                detector.initialStateValid = 0;
+                return 2; // 检查完成但无效
+            }
+            
+            // 如果ADC值过高，可能传感器异常，但仍可尝试校准
+            detector.initialStateValid = 1;
+            return 1;
+        }
+    }
+    
+    return 0; // 检查进行中
 }
 
 /**
@@ -160,42 +246,22 @@ static void initializeAdaptiveDetector(void)
  */
 static uint8_t checkInitialState(void)
 {
-    uint32_t sum = 0;
-    uint32_t averageValue = 0;
+    // 这个函数现在改为调用非阻塞版本
+    // 在主循环中会多次调用，直到完成
+    uint8_t result = checkInitialStateNonBlocking();
     
-    // 进行初始状态检查采样
-    for(int i = 0; i < INITIAL_CHECK_SAMPLES; i++) {
-        sum += adc_convert_single();
-        HAL_IWDG_Refresh(&hiwdg);
-        HAL_Delay(10); // 短暂延时确保采样稳定
+    if(result == 0) {
+        // 还在检查中
+        return 0;
+    } else if(result == 1) {
+        // 检查完成且有效
+        detector.samplingState = SAMPLING_IDLE;
+        return 1;
+    } else {
+        // 检查完成但无效
+        detector.samplingState = SAMPLING_IDLE;
+        return 0;
     }
-    
-    // 计算平均值
-    averageValue = (sum * ADC_REFERENCE_VOLTAGE_MV) / (ADC_RESOLUTION * INITIAL_CHECK_SAMPLES);
-    
-    // 检查传感器连接状态
-    if(averageValue < SENSOR_DISCONNECT_THRESHOLD) {
-        detector.sensorConnected = 0;
-        return 0; // 传感器断开
-    }
-    
-    detector.sensorConnected = 1;
-    
-    // 检查是否在预期的无火焰范围内
-    if(averageValue >= EXPECTED_NO_FLAME_MIN_MV && averageValue <= EXPECTED_NO_FLAME_MAX_MV) {
-        detector.initialStateValid = 1;
-        return 1; // 初始状态有效
-    }
-    
-    // 如果ADC值过低，可能有火焰
-    if(averageValue < EXPECTED_NO_FLAME_MIN_MV) {
-        detector.initialStateValid = 0;
-        return 0; // 可能有火焰
-    }
-    
-    // 如果ADC值过高，可能传感器异常，但仍可尝试校准
-    detector.initialStateValid = 1;
-    return 1;
 }
 
 /**
@@ -348,6 +414,49 @@ static uint8_t performMultiCriteriaDetection(uint32_t currentValue)
 }
 
 /**
+ * @brief 非阻塞ADC采样（状态机实现）
+ * @retval 0-采样中, 1-采样完成
+ */
+static uint8_t performADCSamplingNonBlocking(void)
+{
+    uint32_t currentTime = HAL_GetTick();
+    
+    // 如果不在正常采样状态，开始新的采样
+    if(detector.samplingState != SAMPLING_NORMAL) {
+        detector.samplingState = SAMPLING_NORMAL;
+        detector.samplingSum = 0;
+        detector.samplingCount = 0;
+        detector.samplingType = 1; // 正常检测类型
+        detector.lastSamplingTime = currentTime;
+    }
+    
+    // 每1ms最多采样4次，以保持原有的采样速率
+    if(currentTime - detector.lastSamplingTime >= 1 || detector.samplingCount == 0) {
+        // 一次处理4个采样（如果还没完成）
+        uint8_t samplesToProcess = 4;
+        while(samplesToProcess > 0 && detector.samplingCount < ADC_BUFFER_SIZE) {
+            detector.samplingSum += adc_convert_single();
+            detector.samplingCount++;
+            samplesToProcess--;
+            HAL_IWDG_Refresh(&hiwdg);
+        }
+        
+        detector.lastSamplingTime = currentTime;
+        
+        // 检查是否完成所有采样
+        if(detector.samplingCount >= ADC_BUFFER_SIZE) {
+            // 计算结果
+            detector.samplingResult = (detector.samplingSum * ADC_REFERENCE_VOLTAGE_MV) / 
+                                     (ADC_RESOLUTION * ADC_BUFFER_SIZE);
+            detector.samplingState = SAMPLING_COMPLETE;
+            return 1; // 采样完成
+        }
+    }
+    
+    return 0; // 采样进行中
+}
+
+/**
  * @brief ADC单次转换函数
  * @retval ADC转换值
  */
@@ -369,22 +478,38 @@ uint32_t adc_convert_single(void)
 static FlameStatus_t getFlameStatus(void)
 {
     uint32_t currentTime = HAL_GetTick();
+    static FlameStatus_t lastStatus = FLAME_NOT_DETECTED;
+    static uint8_t initialCheckInProgress = 0;
     
-    // ADC采样并计算平均值
-    uint32_t sum = 0;
-    for(int i = 0; i < ADC_BUFFER_SIZE; i++) 
-    {
-        sum += adc_convert_single();
-        HAL_IWDG_Refresh(&hiwdg);
-        
-        // 优化延时：每4次采样延时1ms
-        if((i & 0x03) == 0x03) {
-            HAL_Delay(1);
+    // 基线校准阶段的初始状态检查
+    if(!detector.isCalibrated && !detector.initialStateValid) {
+        // 执行智能初始状态检查
+        if(!performInitialStateCheck()) {
+            // 如果正在进行初始检查
+            if(detector.samplingState == SAMPLING_INITIAL_CHECK) {
+                initialCheckInProgress = 1;
+                // 初始状态检查进行中，保持上次的状态
+                return lastStatus;
+            }
+            
+            // 初始状态检查失败，显示错误状态
+            if(currentTime - lastDisplayTime >= 100) {
+                displayCalibrationStatus(0); // 显示错误状态
+                lastDisplayTime = currentTime;
+            }
+            return CALIBRATION_ERROR; // 返回校准错误状态
         }
     }
     
-    // 使用整数运算计算电压值
-    Value = (sum * ADC_REFERENCE_VOLTAGE_MV) / (ADC_RESOLUTION * ADC_BUFFER_SIZE);
+    // 执行非阻塞ADC采样
+    if(!performADCSamplingNonBlocking()) {
+        // 采样进行中，返回上次的状态
+        return lastStatus;
+    }
+    
+    // 采样完成，获取结果
+    Value = detector.samplingResult;
+    detector.samplingState = SAMPLING_IDLE; // 重置采样状态
     
     // 传感器断开检测
     if(Value < SENSOR_DISCONNECT_THRESHOLD) {
@@ -396,6 +521,7 @@ static FlameStatus_t getFlameStatus(void)
             lastDisplayTime = currentTime;
         }
         
+        lastStatus = SENSOR_DISCONNECTED;
         return SENSOR_DISCONNECTED;
     } else {
         detector.sensorConnected = 1; // 连接
@@ -403,16 +529,6 @@ static FlameStatus_t getFlameStatus(void)
     
     // 基线校准阶段
     if(!detector.isCalibrated) {
-        // 执行智能初始状态检查
-        if(!performInitialStateCheck()) {
-            // 初始状态检查失败，显示错误状态
-            if(currentTime - lastDisplayTime >= 100) {
-                displayCalibrationStatus(0); // 显示错误状态
-                lastDisplayTime = currentTime;
-            }
-            return CALIBRATION_ERROR; // 返回校准错误状态
-        }
-        
         detector.calibrationSum += Value;
         detector.calibrationSampleCount++;
         
@@ -445,6 +561,7 @@ static FlameStatus_t getFlameStatus(void)
         // 更新previousValue，为校准完成后的检测做准备
         detector.previousValue = Value;
         
+        lastStatus = FLAME_NOT_DETECTED;
         return FLAME_NOT_DETECTED; // 校准期间不检测火焰
     }
     
@@ -472,7 +589,8 @@ static FlameStatus_t getFlameStatus(void)
     // 更新上次测量值
     detector.previousValue = Value;
     
-    return flameDetected ? FLAME_DETECTED : FLAME_NOT_DETECTED;
+    lastStatus = flameDetected ? FLAME_DETECTED : FLAME_NOT_DETECTED;
+    return lastStatus;
 }
 
 /**
