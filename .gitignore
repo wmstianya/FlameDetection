@@ -1,0 +1,37 @@
+# Keil MDK-ARM编译输出
+*.o
+*.d
+*.crf
+*.htm
+*.lnp
+*.map
+*.axf
+*.hex
+*.sct
+*.lst
+*.dep
+*.build_log.htm
+*.iex
+*.__i
+*.Bak
+
+# MDK-ARM项目个人配置
+*.uvguix.*
+*.uvopt
+JLinkLog.txt
+JLinkSettings.ini
+
+# 编译输出目录
+MDK-ARM/FlameDetection/*.o
+MDK-ARM/FlameDetection/*.d
+MDK-ARM/FlameDetection/*.crf
+MDK-ARM/FlameDetection/*.htm
+MDK-ARM/FlameDetection/*.lnp
+MDK-ARM/FlameDetection/*.map
+MDK-ARM/FlameDetection/*.axf
+MDK-ARM/FlameDetection/*.hex
+
+# 系统文件
+.DS_Store
+Thumbs.db
+
