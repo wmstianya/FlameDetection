@@ -66,27 +66,47 @@ void flameTickCallback(void);
 
 /* ===== Fault-detection gate (industrial safety, fail-safe) =============== *
  *
- * FAULT_FLOOR_MV is the most safety-critical knob.  Default 500 mV catches
- * the wet-probe / shorted-to-ground scenario but lets weak real flames pass.
- * After characterising the actual sensor under min real flame, lower this
- * to 0.7 * Vmin_flame for tighter coverage.
+ * Post-field-test hardening: the absolute FLOOR_MV check leaked on wet-probe
+ * shorts that settled above 500 mV but well below baseline.  We now use two
+ * independent shorting checks:
+ *   (a) Absolute floor (Err1): catches dead shorts to ground.
+ *   (b) Relative drop + low variance (Err6): baseline-mv > SHORT_DROP_MV AND
+ *       variance < MIN_FLAME_VARIANCE.  Catches wet/partial shorts that stay
+ *       above the absolute floor but are physically impossible given baseline.
+ *
+ * SAFETY POLICY: the FAULT state is sticky until the unit power-cycles.
+ * This is a RESET-CYCLE LOCK-OUT -- not a UL-296 manual-reset latch, which
+ * would require persistent storage (RTC BKP or Flash) and appropriate
+ * hardware (VBAT) that this PCB does not currently provide.  In addition,
+ * accumulateBaseline() rejects physically-implausible seed values, so a
+ * persistent short at boot forces the system into an IWDG reset loop
+ * rather than silently adopting the short as the new baseline.
  */
-#define FAULT_FLOOR_MV          500U          /* < this => Err1 (wet/short)  */
-#define FAULT_CEILING_MV        3200U         /* > this => Err2 (open)       */
-#define VDDA_MIN_MV             2700U         /* Err3 if VDDA out of range   */
+#define FAULT_FLOOR_MV          500U          /* < this => Err1 (dead short)      */
+#define FAULT_CEILING_MV        3200U         /* > this => Err2 (open circuit)    */
+#define SHORT_DROP_MV           800U          /* baseline - mv > this + low var   */
+                                              /*           => Err6 (wet/partial)  */
+#define VDDA_MIN_MV             2700U         /* Err3 if VDDA out of range        */
 #define VDDA_MAX_MV             3600U
-#define MIN_FLAME_VARIANCE      4U            /* < => Err4 (signal too dead) */
-#define MAX_DV_PER_CYCLE_MV     1500U         /* > => suspicious jump        */
-#define DV_FAULT_CONFIRM_COUNT  3U            /* consecutive jumps -> Err5   */
-#define FAULT_RECOVER_CYCLES    40U           /* ~5 s @ 128 ms cycle         */
+#define MIN_FLAME_VARIANCE      4U            /* < => Err4 (signal too dead)      */
+#define MAX_DV_PER_CYCLE_MV     1500U         /* > => suspicious jump             */
+#define DV_FAULT_CONFIRM_COUNT  3U            /* consecutive jumps -> Err5        */
+
+/* Baseline sanity guard used by WAIT_BASELINE seeding.  Anything outside
+ * this window at power-up is assumed to be a stuck input (short / open) and
+ * is refused -- the state machine stays in WAIT_BASELINE forever, IWDG
+ * eventually resets, and the operator has to physically rectify the probe. */
+#define BASELINE_SANE_MIN_MV    1500U
+#define BASELINE_SANE_MAX_MV    3000U
 
 /* ===== Fault codes (displayed as ErrN on TM1650) ========================= */
 #define FAULT_CODE_NONE         0U
-#define FAULT_CODE_FLOOR        1U            /* Err1 */
-#define FAULT_CODE_CEILING      2U            /* Err2 */
-#define FAULT_CODE_VDDA         3U            /* Err3 */
-#define FAULT_CODE_VARIANCE     4U            /* Err4 */
-#define FAULT_CODE_JUMP         5U            /* Err5 */
+#define FAULT_CODE_FLOOR        1U            /* Err1 dead short to ground   */
+#define FAULT_CODE_CEILING      2U            /* Err2 open circuit           */
+#define FAULT_CODE_VDDA         3U            /* Err3 VDDA out of range      */
+#define FAULT_CODE_VARIANCE     4U            /* Err4 signal too dead        */
+#define FAULT_CODE_JUMP         5U            /* Err5 non-physical jump      */
+#define FAULT_CODE_SHORT_REL    6U            /* Err6 wet/partial short      */
 
 /* ===== Watchdog ========================================================== */
 #define IWDG_RELOAD_VALUE       4095U

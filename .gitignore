@@ -39,3 +39,7 @@ MDK-ARM/JLinkSettings.ini
 # OS
 Thumbs.db
 .DS_Store
+
+# Local debug scripts (not shared across environments)
+gdb_*.txt
+jlink_*.jlink

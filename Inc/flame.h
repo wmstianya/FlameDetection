@@ -3,18 +3,21 @@
   * @file    flame.h
   * @brief   Industrial-grade flame detection module: ADC sampling, trimmed-
   *          mean filter, fault-detection gate (wet probe / open / non-
-  *          physical signal protection with auto-recovery), adaptive baseline
-  *          tracking, Schmitt-trigger thresholds, and a state machine
-  *          governing the LED indicator and fuel-cutoff relay.
+  *          physical signal protection), adaptive baseline tracking,
+  *          Schmitt-trigger thresholds, and a state machine governing the
+  *          LED indicator and fuel-cutoff relay.
   *
-  * @author  2026-05-08
-  * @date    2026-05-08
-  * @version V1.0.0
+  * @author  2026-05-09
+  * @date    2026-05-09
+  * @version V1.2.0
   *
   * @revision
   *   V1.0.0  2026-05-08  Initial version (extracted from main.c, hardened
   *                        with VREFINT calibration, fault gate, and
   *                        adaptive baseline)
+  *   V1.2.0  2026-05-09  Post-field-test hardening: relative-short gate,
+  *                        sticky FAULT, baseline sanity guard, new
+  *                        Err6 (SHORT_REL) code.  See flame.c revision.
   ******************************************************************************
   */
 #ifndef __FLAME_H
@@ -30,11 +33,18 @@ extern "C" {
   * @brief  Flame detection state.
   *
   *         Power-on transitions:
-  *           BLANKING --(2 s)--> WAIT_BASELINE --(16 stable samples)-->
+  *           BLANKING --(2 s)--> WAIT_BASELINE --(16 plausible samples)-->
   *               NO_FLAME <--> FLAME_ON <--> CONFIRM_OFF
   *
   *         Any state may be pre-empted by FAULT (highest priority).
-  *         FAULT --(5 s of plausible signal)--> WAIT_BASELINE.
+  *         FAULT is sticky: no transition out of FAULT exists.  A reset
+  *         (watchdog / power cycle) puts the state machine back into
+  *         BLANKING, but if the underlying short/open is still present the
+  *         baseline-sanity guard keeps the unit looping in WAIT_BASELINE
+  *         and IWDG keeps resetting it, so the relay never closes until
+  *         the probe is physically corrected.  This is a reset-cycle
+  *         lock-out, not a true UL-296 manual-reset latch (which would
+  *         require VBAT-backed RTC BKP or Flash persistence).
   */
 typedef enum
 {

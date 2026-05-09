@@ -11,9 +11,27 @@
   *          against the wet-probe / open-circuit / non-physical-signal
   *          failure modes typical of industrial boiler-room deployments.
   *
-  * @author  2026-05-08
-  * @date    2026-05-08
-  * @version V1.0.0
+ * @author  2026-05-09
+ * @date    2026-05-09
+ * @version V1.2.0
+ *
+ * @revision
+ *   V1.0.0  2026-05-08  Initial: DMA sampling + fault gate + auto-recover
+ *   V1.1.0  2026-05-09  Post-J-Link-probe hardening: relative SHORT_DROP_MV
+ *                        check catches wet shorts above FAULT_FLOOR_MV;
+ *                        FAULT is now sticky; recoverCounter removed.
+ *   V1.2.0  2026-05-09  Review fixes:
+ *                        - new Err6 (FAULT_CODE_SHORT_REL) for wet shorts
+ *                          (keeps Err1 meaning dead-short for maintenance)
+ *                        - isRelativeShort() extracted; evaluateFaultGate
+ *                          back under 20 lines
+ *                        - handleStateFault() removed, maybeEnterFault()
+ *                          returns 1 directly when already in FAULT
+ *                        - accumulateBaseline() rejects out-of-window
+ *                          samples so a boot-time short cannot seed
+ *                          baseline across a reset (reset-cycle lock-out,
+ *                          NOT UL-296 manual-reset: that needs VBAT +
+ *                          BKP which this board lacks)
   ******************************************************************************
   */
 #include "flame.h"
@@ -42,7 +60,6 @@ static          uint8_t      faultCode          = FAULT_CODE_NONE;
 static          int16_t      dieTempC           = 0;
 
 /* Counters owned by main loop (no ISR write) */
-static uint8_t   recoverCounter      = 0U;
 static uint8_t   dvFaultCounter      = 0U;
 static uint8_t   baselineSampleIdx   = 0U;
 static uint32_t  baselineAccumulator = 0U;
@@ -173,14 +190,36 @@ static uint16_t adcRawToMv(uint16_t raw, uint32_t vdda)
 /* -------------------------------------------------------------------------- */
 
 /**
+  * @brief  Check whether the current sample looks like a wet/partial short:
+  *         signal collapsed well below the live baseline AND variance died.
+  *         Gated on "baseline is trusted" so BLANKING / WAIT_BASELINE / FAULT
+  *         cannot spuriously trip it.
+  * @param  mv        Current mV reading
+  * @param  variance  Sample variance over trimmed window
+  * @param  state     Current flame state
+  * @retval 1 if relative-short pattern matches, 0 otherwise
+  */
+static uint8_t isRelativeShort(uint16_t     mv,
+                               uint16_t     variance,
+                               flameState_t state)
+{
+    uint8_t baselineTrusted = (state == FLAME_STATE_NO_FLAME)
+                              || (state == FLAME_STATE_FLAME_ON)
+                              || (state == FLAME_STATE_CONFIRM_OFF);
+    if (!baselineTrusted)               { return 0U; }
+    if (baselineMv <= SHORT_DROP_MV)    { return 0U; }
+    if (mv >= (uint16_t)(baselineMv - SHORT_DROP_MV)) { return 0U; }
+    return (variance < MIN_FLAME_VARIANCE) ? 1U : 0U;
+}
+
+/**
   * @brief  Decide whether the current cycle should trigger a fault.
   *         Order matters: most-specific failure modes checked first so the
   *         operator sees the most actionable Err code.
-  *
   * @param  mv        Current trimmed-mean reading in mV
   * @param  variance  Sample variance over trimmed window
   * @param  vdda      Live VDDA in mV
-  * @param  state     Current flame state (variance check is gated to "claimed flame")
+  * @param  state     Current flame state
   * @retval Fault code (0 = no fault)
   */
 static uint8_t evaluateFaultGate(uint16_t mv,
@@ -188,15 +227,13 @@ static uint8_t evaluateFaultGate(uint16_t mv,
                                  uint32_t vdda,
                                  flameState_t state)
 {
-    if (mv < FAULT_FLOOR_MV)              { return FAULT_CODE_FLOOR;   }
-    if (mv > FAULT_CEILING_MV)            { return FAULT_CODE_CEILING; }
+    if (mv < FAULT_FLOOR_MV)    { return FAULT_CODE_FLOOR;   }
+    if (mv > FAULT_CEILING_MV)  { return FAULT_CODE_CEILING; }
     if ((vdda < VDDA_MIN_MV) || (vdda > VDDA_MAX_MV))
     {
         return FAULT_CODE_VDDA;
     }
-
-    /* Variance check only when claiming flame: stable mid-range short
-       must not be allowed to masquerade as a steady real flame. */
+    if (isRelativeShort(mv, variance, state)) { return FAULT_CODE_SHORT_REL; }
     if (((state == FLAME_STATE_FLAME_ON) || (state == FLAME_STATE_CONFIRM_OFF))
         && (variance < MIN_FLAME_VARIANCE))
     {
@@ -258,13 +295,22 @@ static void resetBaselineCapture(void)
 
 /**
   * @brief  Accumulate one sample into baseline averaging during
-  *         WAIT_BASELINE.  Once BASELINE_INIT_SAMPLES collected, finalise
-  *         and return 1.
+  *         WAIT_BASELINE.  Samples physically implausible at power-up
+  *         (below BASELINE_SANE_MIN_MV or above BASELINE_SANE_MAX_MV) are
+  *         rejected -- a stuck input (wet probe / shorted wiring / open
+  *         sensor present at boot) will therefore never become a trusted
+  *         baseline.  The state machine stalls in WAIT_BASELINE and IWDG
+  *         eventually resets the MCU.  Operator intervention (inspect and
+  *         rectify the probe) is required to leave the reset loop.
   * @param  mv  Current mV reading
   * @retval 1 if baseline captured this cycle, 0 if still collecting
   */
 static uint8_t accumulateBaseline(uint16_t mv)
 {
+    if ((mv < BASELINE_SANE_MIN_MV) || (mv > BASELINE_SANE_MAX_MV))
+    {
+        return 0U;
+    }
     baselineAccumulator += mv;
     baselineSampleIdx++;
     if (baselineSampleIdx >= BASELINE_INIT_SAMPLES)
@@ -386,27 +432,8 @@ static void handleStateConfirmOff(uint16_t mv)
     }
 }
 
-/**
-  * @brief  FAULT recovery: count consecutive plausible cycles; transition
-  *         out after FAULT_RECOVER_CYCLES.
-  * @param  faultStillPresent  1 if current cycle's fault gate triggered
-  * @retval None
-  */
-static void handleStateFault(uint8_t faultStillPresent)
-{
-    if (faultStillPresent != 0U)
-    {
-        recoverCounter = 0U;
-        return;
-    }
-    recoverCounter++;
-    if (recoverCounter >= FAULT_RECOVER_CYCLES)
-    {
-        recoverCounter = 0U;
-        faultCode      = FAULT_CODE_NONE;
-        changeState(FLAME_STATE_WAIT_BASELINE);
-    }
-}
+/* FAULT is sticky: once entered, the state machine cannot self-clear.
+ * Handled inline in maybeEnterFault() -- no dedicated handler needed. */
 
 /* -------------------------------------------------------------------------- */
 /*                       Output drivers                                       */
@@ -453,7 +480,6 @@ void flameInit(void)
     baselineMv          = 3000U;
     faultCode           = FAULT_CODE_NONE;
     dieTempC            = 0;
-    recoverCounter      = 0U;
     dvFaultCounter      = 0U;
     diagRefreshCounter  = 0U;
     cachedVddaMv        = 3300U;
@@ -504,22 +530,22 @@ static void dispatchNormalState(uint16_t mv, uint16_t variance)
 }
 
 /**
-  * @brief  Try to enter FAULT.  Skipped if already in FAULT (handled by
-  *         handleStateFault recovery path).
+  * @brief  Try to enter FAULT.  Once FAULT is set, this function returns
+  *         1 and performs no further transitions: the state is sticky
+  *         until the next reset.  flameInit()'s BASELINE_SANE guard then
+  *         prevents a persistent short from re-seeding the baseline.
   * @param  newFault  Fault code from evaluateFaultGate (0 = no fault)
-  * @retval 1 if FAULT was entered or is already active, 0 if normal
+  * @retval 1 if FAULT is active (entered this cycle or latched), 0 otherwise
   */
 static uint8_t maybeEnterFault(uint8_t newFault)
 {
     if (flameState == FLAME_STATE_FAULT)
     {
-        handleStateFault(newFault != FAULT_CODE_NONE);
         return 1U;
     }
     if (newFault != FAULT_CODE_NONE)
     {
-        faultCode      = newFault;
-        recoverCounter = 0U;
+        faultCode = newFault;
         changeState(FLAME_STATE_FAULT);
         return 1U;
     }
