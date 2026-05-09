@@ -7,17 +7,19 @@
   *          Schmitt-trigger thresholds, and a state machine governing the
   *          LED indicator and fuel-cutoff relay.
   *
-  * @author  2026-05-09
-  * @date    2026-05-09
-  * @version V1.2.0
-  *
-  * @revision
-  *   V1.0.0  2026-05-08  Initial version (extracted from main.c, hardened
-  *                        with VREFINT calibration, fault gate, and
-  *                        adaptive baseline)
-  *   V1.2.0  2026-05-09  Post-field-test hardening: relative-short gate,
-  *                        sticky FAULT, baseline sanity guard, new
-  *                        Err6 (SHORT_REL) code.  See flame.c revision.
+ * @author  2026-05-09
+ * @date    2026-05-09
+ * @version V1.3.0
+ *
+ * @revision
+ *   V1.0.0  2026-05-08  Initial version (extracted from main.c, hardened
+ *                        with VREFINT calibration, fault gate, and
+ *                        adaptive baseline)
+ *   V1.2.0  2026-05-09  Post-field-test hardening: relative-short gate,
+ *                        sticky FAULT, baseline sanity guard, new
+ *                        Err6 (SHORT_REL) code.  See flame.c revision.
+ *   V1.3.0  2026-05-09  Ion-probe field-hardening: 50 Hz notch, ignition
+ *                        frame discard, baseline drift monitor (Err7).
   ******************************************************************************
   */
 #ifndef __FLAME_H

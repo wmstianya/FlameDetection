@@ -107,6 +107,24 @@ void flameTickCallback(void);
 #define FAULT_CODE_VARIANCE     4U            /* Err4 signal too dead        */
 #define FAULT_CODE_JUMP         5U            /* Err5 non-physical jump      */
 #define FAULT_CODE_SHORT_REL    6U            /* Err6 wet/partial short      */
+#define FAULT_CODE_DRIFT        7U            /* Err7 probe soot/moisture    */
+
+/* ===== 50 Hz notch filter ================================================ */
+/* IIR biquad notch: fs=1000 Hz, f0=50 Hz, Q=5 (BW ~10 Hz).
+ * Removes mains EMI picked up by the high-impedance ion probe without
+ * affecting the 1~15 Hz flame-flicker band. */
+
+/* ===== Ignition spark frame discard ====================================== */
+#define ADC_CLIP_LOW            10U           /* < this => clipped to ground */
+#define ADC_CLIP_HIGH           4085U         /* > this => clipped to rail   */
+#define CLIP_DISCARD_THRESHOLD  16U           /* > this many clips -> discard*/
+
+/* ===== Baseline drift monitoring (probe soot / moisture) ================= *
+ * If baseline drifts down by more than BASELINE_DRIFT_WARN_MV over a
+ * DRIFT_CHECK_INTERVAL window, the probe is accumulating soot or moisture
+ * and needs maintenance.  Reports Err7 and latches FAULT. */
+#define BASELINE_DRIFT_WARN_MV  300U          /* mV cumulative drop -> Err7  */
+#define DRIFT_CHECK_INTERVAL    480U          /* frames (~60 s @ 128 ms)     */
 
 /* ===== Watchdog ========================================================== */
 #define IWDG_RELOAD_VALUE       4095U
