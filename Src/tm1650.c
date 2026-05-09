@@ -3,15 +3,23 @@
   * @file    tm1650.c
   * @brief   TM1650 4-digit 7-segment LED driver over software IIC (PD1=CLK,
   *          PD2=SDA).  Also initialises LED indicator (PA10) and relay (PA11).
-  * @author  Refactored 2026-05-08
-  * @date    2026-05-08
-  * @version V1.1.0
+  * @author  Refactored 2026-05-09
+  * @date    2026-05-09
+  * @version V1.2.0
   *
   * @revision
-  *   V1.0.0  2024  Initial version
+  *   V1.0.0  2024        Initial version
   *   V1.1.0  2026-05-08  camelCase rename, volatile delay fix, IIC ACK early
   *           return, brightness sent once at init, function split <=20 lines,
   *           remove dead code Send_To_TM1650
+  *   V1.2.0  2026-05-09  tm1650Refresh() resends brightness every frame;
+  *                        field hardware showed permanent black-screen
+  *                        after an LED-board power glitch because the
+  *                        brightness/display-on command was only sent
+  *                        once at boot.  Every display refresh now begins
+  *                        with the brightness command so the TM1650
+  *                        re-initialises itself the next frame after any
+  *                        independent power-cycle.
   ******************************************************************************
   */
 #include "tm1650.h"
@@ -28,7 +36,6 @@
 /* ---- TM1650 protocol ----------------------------------------------------- */
 #define TM1650_CMD_ADDR         0x48U
 #define TM1650_BRIGHTNESS_CMD   0x71U /* 8/16 duty, 8-segment mode, ON */
-#define TM1650_DIGIT_COUNT      4U
 #define IIC_ACK_TIMEOUT         100U
 
 /* 7-segment encoding for digits 0-9 (common-cathode, active-high segments) */
@@ -165,7 +172,10 @@ static void ledRelayGpioInit(void)
 }
 
 /**
-  * @brief  Send brightness / display-on command to TM1650 (once at boot).
+  * @brief  Send brightness / display-on command to TM1650.  Called on boot
+  *         and at the start of every tm1650Refresh() so that an LED-board
+  *         power glitch (independent of the MCU) cannot leave the display
+  *         stuck in the power-on display-off state.
   */
 static void tm1650SetBrightness(void)
 {
@@ -186,6 +196,16 @@ void tm1650Init(void)
     tm1650SetBrightness();
 }
 
+void tm1650Refresh(const uint8_t segs[TM1650_DIGIT_COUNT])
+{
+    /* Resend brightness first so a power-cycled TM1650 recovers here. */
+    tm1650SetBrightness();
+    for (uint8_t i = 0U; i < TM1650_DIGIT_COUNT; i++)
+    {
+        tm1650WriteDigit(DIGIT_ADDR[i], segs[i]);
+    }
+}
+
 /**
   * @brief  Write a segment pattern to one digit position via IIC.
   * @param  addr   TM1650 digit register address (0x68/0x6A/0x6C/0x6E)
@@ -204,13 +224,16 @@ uint8_t tm1650WriteDigit(uint8_t addr, uint8_t value)
 }
 
 /**
-  * @brief  Display a 0-9999 integer with leading-zero blanking.
+  * @brief  Display a 0-9999 integer with leading-zero blanking.  Resends
+  *         the brightness command as part of the refresh so the display
+  *         auto-recovers from LED-board power glitches.
   * @param  data  Value to display (0 .. 9999)
   * @retval None
   */
 void tm1650ShowValue(uint16_t data)
 {
     uint8_t digits[TM1650_DIGIT_COUNT];
+    uint8_t segs[TM1650_DIGIT_COUNT];
     uint8_t leadingZero = 1U;
 
     digits[0] = (uint8_t)(data / 1000U);
@@ -223,27 +246,32 @@ void tm1650ShowValue(uint16_t data)
         uint8_t isLastDigit = (i == TM1650_DIGIT_COUNT - 1U);
         if (!isLastDigit && (digits[i] == 0U) && leadingZero)
         {
-            tm1650WriteDigit(DIGIT_ADDR[i], 0x00U);
+            segs[i] = 0x00U;
         }
         else
         {
             leadingZero = 0U;
-            tm1650WriteDigit(DIGIT_ADDR[i], SEGMENT_MAP[digits[i]]);
+            segs[i] = SEGMENT_MAP[digits[i]];
         }
     }
+    tm1650Refresh(segs);
 }
 
 /**
-  * @brief  Display "ErrN" pattern: E r r digit
+  * @brief  Display "ErrN" pattern: E r r digit.  Resends brightness as
+  *         part of the refresh so a glitch-disabled display still lights
+  *         up on the next cycle.
   * @param  code  Fault digit 0..9 (truncated by modulo)
   * @retval None
   */
 void tm1650ShowFaultCode(uint8_t code)
 {
     uint8_t digit = (uint8_t)(code % 10U);
+    uint8_t segs[TM1650_DIGIT_COUNT];
 
-    tm1650WriteDigit(DIGIT_ADDR[0], SEG_LETTER_E);
-    tm1650WriteDigit(DIGIT_ADDR[1], SEG_LETTER_R);
-    tm1650WriteDigit(DIGIT_ADDR[2], SEG_LETTER_R);
-    tm1650WriteDigit(DIGIT_ADDR[3], SEGMENT_MAP[digit]);
+    segs[0] = SEG_LETTER_E;
+    segs[1] = SEG_LETTER_R;
+    segs[2] = SEG_LETTER_R;
+    segs[3] = SEGMENT_MAP[digit];
+    tm1650Refresh(segs);
 }
