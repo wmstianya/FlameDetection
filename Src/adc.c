@@ -96,7 +96,7 @@ static void adcCoreInit(ADC_InitTypeDef *init)
     init->NbrOfConversion       = 1U;
     init->ExternalTrigConv      = ADC_EXTERNALTRIG_T6_TRGO;
     init->ExternalTrigConvEdge  = ADC_EXTERNALTRIGCONVEDGE_RISING;
-    init->DMAContinuousRequests = ENABLE;
+    init->DMAContinuousRequests = DISABLE;
     init->Overrun               = ADC_OVR_DATA_PRESERVED;
     init->SamplingTimeCommon1   = ADC_SAMPLETIME_160CYCLES_5;
     init->SamplingTimeCommon2   = ADC_SAMPLETIME_160CYCLES_5;
