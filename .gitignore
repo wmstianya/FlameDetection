@@ -1,0 +1,41 @@
+# Build outputs (GCC)
+build/
+*.o
+*.d
+*.lst
+*.map
+*.elf
+*.hex
+*.bin
+
+# Keil MDK generated - build artifacts
+MDK-ARM/FlameDetection/
+MDK-ARM/Objects/
+MDK-ARM/Listings/
+MDK-ARM/RTE/
+MDK-ARM/*.bak
+MDK-ARM/*.dep
+MDK-ARM/*.uvguix*
+MDK-ARM/*.uvopt
+MDK-ARM/*.scvd
+MDK-ARM/JLinkLog.txt
+MDK-ARM/JLinkSettings.ini
+*.crf
+*.axf
+*.build_log.htm
+*.htm
+*.lnp
+*.sct
+*.iex
+
+# STM32CubeMX
+.mxproject
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+Thumbs.db
+.DS_Store

@@ -1,0 +1,85 @@
+/**
+  ******************************************************************************
+  * @file    flame.h
+  * @brief   Industrial-grade flame detection module: ADC sampling, trimmed-
+  *          mean filter, fault-detection gate (wet probe / open / non-
+  *          physical signal protection with auto-recovery), adaptive baseline
+  *          tracking, Schmitt-trigger thresholds, and a state machine
+  *          governing the LED indicator and fuel-cutoff relay.
+  *
+  * @author  2026-05-08
+  * @date    2026-05-08
+  * @version V1.0.0
+  *
+  * @revision
+  *   V1.0.0  2026-05-08  Initial version (extracted from main.c, hardened
+  *                        with VREFINT calibration, fault gate, and
+  *                        adaptive baseline)
+  ******************************************************************************
+  */
+#ifndef __FLAME_H
+#define __FLAME_H
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#include "main.h"
+
+/**
+  * @brief  Flame detection state.
+  *
+  *         Power-on transitions:
+  *           BLANKING --(2 s)--> WAIT_BASELINE --(16 stable samples)-->
+  *               NO_FLAME <--> FLAME_ON <--> CONFIRM_OFF
+  *
+  *         Any state may be pre-empted by FAULT (highest priority).
+  *         FAULT --(5 s of plausible signal)--> WAIT_BASELINE.
+  */
+typedef enum
+{
+    FLAME_STATE_BLANKING      = 0,
+    FLAME_STATE_WAIT_BASELINE = 1,
+    FLAME_STATE_NO_FLAME      = 2,
+    FLAME_STATE_FLAME_ON      = 3,
+    FLAME_STATE_CONFIRM_OFF   = 4,
+    FLAME_STATE_FAULT         = 5
+} flameState_t;
+
+/**
+  * @brief  Initialise flame detection module.  Must be called after MCU
+  *         clock + ADC init and after tm1650Init() (which performs the
+  *         LED / relay GPIO configuration).
+  * @retval None
+  */
+void flameInit(void);
+
+/**
+  * @brief  One full processing cycle: collect 128 samples (~128 ms), apply
+  *         trimmed-mean filter, evaluate fault gate, run state machine,
+  *         drive relay/LED, and update display.  Call from main loop.
+  * @retval None
+  */
+void flameProcess(void);
+
+/**
+  * @brief  1 ms tick callback, invoked from SysTick_Handler.
+  *         Drives flameOffCount / firstStartCount and the FAULT-state
+  *         LED blink.
+  * @retval None
+  */
+void flameTickCallback(void);
+
+/* ---- Diagnostic getters (read-only) -------------------------------------- */
+
+flameState_t flameGetState(void);
+uint16_t     flameGetLastMv(void);
+uint16_t     flameGetBaselineMv(void);
+uint8_t      flameGetFaultCode(void);   /* 0 = no fault, otherwise FAULT_CODE_* */
+int16_t      flameGetDieTempC(void);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* __FLAME_H */
