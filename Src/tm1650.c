@@ -4,8 +4,8 @@
   * @brief   TM1650 4-digit 7-segment LED driver over software IIC (PD1=CLK,
   *          PD2=SDA).  Also initialises LED indicator (PA10) and relay (PA11).
   * @author  Refactored 2026-05-09
-  * @date    2026-05-09
-  * @version V1.2.0
+  * @date    2026-05-11
+  * @version V1.3.0
   *
   * @revision
   *   V1.0.0  2024        Initial version
@@ -20,6 +20,11 @@
   *                        with the brightness command so the TM1650
   *                        re-initialises itself the next frame after any
   *                        independent power-cycle.
+  *   V1.3.0  2026-05-11  Added tm1650ShowValueDp() for diagnostic display
+  *                        (decimal-point on last digit distinguishes
+  *                        variance readings from mV readings when the
+  *                        diag mode alternates between them).  Digit
+  *                        build factored into tm1650BuildValueSegs().
   ******************************************************************************
   */
 #include "tm1650.h"
@@ -224,16 +229,18 @@ uint8_t tm1650WriteDigit(uint8_t addr, uint8_t value)
 }
 
 /**
-  * @brief  Display a 0-9999 integer with leading-zero blanking.  Resends
-  *         the brightness command as part of the refresh so the display
-  *         auto-recovers from LED-board power glitches.
-  * @param  data  Value to display (0 .. 9999)
+  * @brief  Convert a 0..9999 integer into four segment bytes with
+  *         leading-zero blanking.  Shared by tm1650ShowValue and
+  *         tm1650ShowValueDp; kept separate from the refresh call so the
+  *         caller can decorate the segments (e.g. set the decimal-point
+  *         bit) before sending.
+  * @param  data  Value 0..9999 (clamped implicitly by uint16_t arithmetic)
+  * @param  segs  Output buffer (TM1650_DIGIT_COUNT bytes)
   * @retval None
   */
-void tm1650ShowValue(uint16_t data)
+static void tm1650BuildValueSegs(uint16_t data, uint8_t segs[TM1650_DIGIT_COUNT])
 {
     uint8_t digits[TM1650_DIGIT_COUNT];
-    uint8_t segs[TM1650_DIGIT_COUNT];
     uint8_t leadingZero = 1U;
 
     digits[0] = (uint8_t)(data / 1000U);
@@ -254,6 +261,36 @@ void tm1650ShowValue(uint16_t data)
             segs[i] = SEGMENT_MAP[digits[i]];
         }
     }
+}
+
+/**
+  * @brief  Display a 0-9999 integer with leading-zero blanking.  Resends
+  *         the brightness command as part of the refresh so the display
+  *         auto-recovers from LED-board power glitches.
+  * @param  data  Value to display (0 .. 9999)
+  * @retval None
+  */
+void tm1650ShowValue(uint16_t data)
+{
+    uint8_t segs[TM1650_DIGIT_COUNT];
+    tm1650BuildValueSegs(data, segs);
+    tm1650Refresh(segs);
+}
+
+/**
+  * @brief  Same as tm1650ShowValue but lights the decimal-point bit on
+  *         the last digit.  The TM1650 7-segment encoding puts DP at bit
+  *         7, so OR-ing 0x80 with the last segment byte turns it on.
+  *         Used by the diagnostic display path so operators can tell at
+  *         a glance which number they are currently reading.
+  * @param  data  Value to display (0 .. 9999)
+  * @retval None
+  */
+void tm1650ShowValueDp(uint16_t data)
+{
+    uint8_t segs[TM1650_DIGIT_COUNT];
+    tm1650BuildValueSegs(data, segs);
+    segs[TM1650_DIGIT_COUNT - 1U] |= 0x80U;
     tm1650Refresh(segs);
 }
 

@@ -58,39 +58,15 @@ void flameTickCallback(void);
 #define VDDA_REFRESH_PERIOD     8U            /* refresh VDDA+dieTemp every  */
                                               /* N frames (~1 s @ 128ms)     */
 
-/* ===== Adaptive baseline (Schmitt-trigger relative thresholds) =========== */
-#define FLAME_ON_DELTA_MV       100U          /* mV below baseline => ON     */
-#define FLAME_OFF_DELTA_MV       60U          /* mV below baseline => stay   */
-#define BASELINE_EMA_SHIFT      5U            /* tau ~ 32 cycles ~ 4 s       */
-#define BASELINE_INIT_SAMPLES   16U           /* averaged at WAIT_BASELINE   */
+/* ===== Fixed startup baseline (V1.5.0) =================================== */
+#define FLAME_ON_DELTA_MV       500U          /* startupBaseline - mv > this   */
+                                              /* => FLAME_ON (relay closes)     */
+#define BASELINE_INIT_SAMPLES   16U           /* averaged at WAIT_BASELINE     */
 
-/* ===== Fault-detection gate (industrial safety, fail-safe) =============== *
- *
- * Post-field-test hardening: the absolute FLOOR_MV check leaked on wet-probe
- * shorts that settled above 500 mV but well below baseline.  We now use two
- * independent shorting checks:
- *   (a) Absolute floor (Err1): catches dead shorts to ground.
- *   (b) Relative drop + low variance (Err6): baseline-mv > SHORT_DROP_MV AND
- *       variance < MIN_FLAME_VARIANCE.  Catches wet/partial shorts that stay
- *       above the absolute floor but are physically impossible given baseline.
- *
- * SAFETY POLICY: the FAULT state is sticky until the unit power-cycles.
- * This is a RESET-CYCLE LOCK-OUT -- not a UL-296 manual-reset latch, which
- * would require persistent storage (RTC BKP or Flash) and appropriate
- * hardware (VBAT) that this PCB does not currently provide.  In addition,
- * accumulateBaseline() rejects physically-implausible seed values, so a
- * persistent short at boot forces the system into an IWDG reset loop
- * rather than silently adopting the short as the new baseline.
- */
-#define FAULT_FLOOR_MV          500U          /* < this => Err1 (dead short)      */
-#define FAULT_CEILING_MV        3200U         /* > this => Err2 (open circuit)    */
-#define SHORT_DROP_MV           800U          /* baseline - mv > this + low var   */
-                                              /*           => Err6 (wet/partial)  */
-#define VDDA_MIN_MV             2700U         /* Err3 if VDDA out of range        */
-#define VDDA_MAX_MV             3600U
-#define MIN_FLAME_VARIANCE      4U            /* < => Err4 (signal too dead)      */
-#define MAX_DV_PER_CYCLE_MV     1500U         /* > => suspicious jump             */
-#define DV_FAULT_CONFIRM_COUNT  3U            /* consecutive jumps -> Err5        */
+/* Optional false-flame (Err6) variance gate.  Production default = 0 (off).
+ * Set to 1 to enable: large drop + variance <= FALSE_FLAME_VAR_MAX => Err6. */
+#define ENABLE_VARIANCE_CHECK   0U            /* 1 = on, 0 = off (production) */
+#define FALSE_FLAME_VAR_MAX     100U          /* LSB^2; var <= this => Err6    */
 
 /* Baseline sanity guard used by WAIT_BASELINE seeding.  Anything outside
  * this window at power-up is assumed to be a stuck input (short / open) and
@@ -98,6 +74,8 @@ void flameTickCallback(void);
  * eventually resets, and the operator has to physically rectify the probe. */
 #define BASELINE_SANE_MIN_MV    1500U
 #define BASELINE_SANE_MAX_MV    3000U
+
+/* SAFETY POLICY: the FAULT state is sticky until the unit power-cycles. */
 
 /* ===== Fault codes (displayed as ErrN on TM1650) ========================= */
 #define FAULT_CODE_NONE         0U
@@ -119,16 +97,22 @@ void flameTickCallback(void);
 #define ADC_CLIP_HIGH           4085U         /* > this => clipped to rail   */
 #define CLIP_DISCARD_THRESHOLD  16U           /* > this many clips -> discard*/
 
-/* ===== Baseline drift monitoring (probe soot / moisture) ================= *
- * If baseline drifts down by more than BASELINE_DRIFT_WARN_MV over a
- * DRIFT_CHECK_INTERVAL window, the probe is accumulating soot or moisture
- * and needs maintenance.  Reports Err7 and latches FAULT. */
-#define BASELINE_DRIFT_WARN_MV  300U          /* mV cumulative drop -> Err7  */
-#define DRIFT_CHECK_INTERVAL    480U          /* frames (~60 s @ 128 ms)     */
-
 /* ===== Watchdog ========================================================== */
 #define IWDG_RELOAD_VALUE       4095U
 #define IWDG_WINDOW_VALUE       4095U         /* 4095 = window disabled      */
+
+/* ===== Diagnostic display (development only) ============================ *
+ * DIAG_SHOW_VARIANCE=1: display shows variance continuously (with trailing
+ * decimal point), but flips to mV for DIAG_MV_FRAMES (~1 s) once every
+ * DIAG_CYCLE_FRAMES (~5 s).  Variance > 9999 is compressed by /10 to fit
+ * the 4-digit field.  Set DIAG_SHOW_VARIANCE to 0 for production firmware.
+ *
+ * DISABLE_FAULT_GATE=1: bypasses evaluateFaultGate so the fault-code display
+ * never triggers.  TEST MODE ONLY -- do NOT ship. */
+#define DIAG_SHOW_VARIANCE      0U            /* 1 = diag display, 0 = off     */
+#define DIAG_CYCLE_FRAMES       39U           /* 5 s total cycle (39 × 128 ms) */
+#define DIAG_MV_FRAMES          8U            /* 1 s mV window per cycle       */
+#define DISABLE_FAULT_GATE      0U            /* 1 = bypass fault gate (TEST)  */
 
 /* ===== GPIO pin map ====================================================== */
 #define LED_PORT                GPIOA

@@ -2,14 +2,13 @@
   ******************************************************************************
   * @file    flame.h
   * @brief   Industrial-grade flame detection module: ADC sampling, trimmed-
-  *          mean filter, fault-detection gate (wet probe / open / non-
-  *          physical signal protection), adaptive baseline tracking,
-  *          Schmitt-trigger thresholds, and a state machine governing the
-  *          LED indicator and fuel-cutoff relay.
+  *          mean filter, optional false-flame (Err6) gate, fixed startup
+  *          baseline, and a state machine governing the LED indicator and
+  *          fuel-cutoff relay.
   *
- * @author  2026-05-09
- * @date    2026-05-09
- * @version V1.3.0
+ * @author  2026-05-27
+ * @date    2026-05-27
+ * @version V1.5.0
  *
  * @revision
  *   V1.0.0  2026-05-08  Initial version (extracted from main.c, hardened
@@ -20,6 +19,14 @@
  *                        Err6 (SHORT_REL) code.  See flame.c revision.
  *   V1.3.0  2026-05-09  Ion-probe field-hardening: 50 Hz notch, ignition
  *                        frame discard, baseline drift monitor (Err7).
+ *   V1.4.0  2026-05-11  Field-data rebalance: FAULT_FLOOR_MV 500->250 mV,
+ *                        variance-gated short detection throughout, new
+ *                        absolute-level Err6 that fires during
+ *                        WAIT_BASELINE (handles boot-time condensate).
+ *   V1.5.0  2026-05-27  Simplified detection: fixed startup baseline,
+ *                        500 mV drop for FLAME_ON, FLAME_OFF at startup
+ *                        baseline with debounce.  Only Err6 retained
+ *                        (optional via ENABLE_VARIANCE_CHECK).
   ******************************************************************************
   */
 #ifndef __FLAME_H
@@ -86,7 +93,8 @@ void flameTickCallback(void);
 
 flameState_t flameGetState(void);
 uint16_t     flameGetLastMv(void);
-uint16_t     flameGetBaselineMv(void);
+uint16_t     flameGetLastVariance(void);  /* diagnostic: last trimmed variance */
+uint16_t     flameGetBaselineMv(void);    /* fixed startup baseline (mV)       */
 uint8_t      flameGetFaultCode(void);   /* 0 = no fault, otherwise FAULT_CODE_* */
 int16_t      flameGetDieTempC(void);
 

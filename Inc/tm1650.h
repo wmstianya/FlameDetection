@@ -4,8 +4,8 @@
   * @brief   TM1650 4-digit 7-segment LED driver public API.
   *          Also handles LED indicator (PA10) and relay (PA11) GPIO init.
   * @author  Refactored 2026-05-09
-  * @date    2026-05-09
-  * @version V1.2.0
+  * @date    2026-05-11
+  * @version V1.3.0
   *
   * @revision
   *   V1.0.0  2024        Initial version
@@ -15,6 +15,7 @@
   *                        power glitch (observed on field hardware:
   *                        glitch triggered permanent black-screen because
   *                        brightness was only sent once at boot)
+  *   V1.3.0  2026-05-11  tm1650ShowValueDp() for diagnostic display
   ******************************************************************************
   */
 #ifndef __TM1650_H
@@ -61,6 +62,16 @@ void tm1650Refresh(const uint8_t segs[TM1650_DIGIT_COUNT]);
   * @retval None
   */
 void tm1650ShowValue(uint16_t data);
+
+/**
+  * @brief  Display a 0-9999 integer with a trailing decimal point on the
+  *         last digit.  Used by the diagnostic display path to visually
+  *         distinguish a variance reading from an mV reading when the
+  *         display alternates between the two.
+  * @param  data  Value to display (0 .. 9999)
+  * @retval None
+  */
+void tm1650ShowValueDp(uint16_t data);
 
 /**
   * @brief  Display a fault code as "ErrN" on the 4-digit display.

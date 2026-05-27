@@ -1,19 +1,13 @@
 /**
   ******************************************************************************
   * @file    flame.c
-  * @brief   Industrial flame detection: trimmed-mean filter, fault-detection
-  *          gate, adaptive baseline tracking with Schmitt-trigger thresholds,
-  *          and a state machine driving relay (PA11) and LED (PA10).
+  * @brief   Industrial flame detection: trimmed-mean filter, optional false-
+  *          flame (Err6) gate, fixed startup baseline, and a state machine
+  *          driving relay (PA11) and LED (PA10).
   *
-  *          The fault gate runs BEFORE the state machine and forces
-  *          relay = OFF whenever any safety judgement triggers, regardless
-  *          of what the state machine would otherwise decide.  This protects
-  *          against the wet-probe / open-circuit / non-physical-signal
-  *          failure modes typical of industrial boiler-room deployments.
-  *
- * @author  2026-05-09
- * @date    2026-05-09
- * @version V1.3.0
+ * @author  2026-05-11
+ * @date    2026-05-11
+ * @version V1.5.0
  *
  * @revision
  *   V1.0.0  2026-05-08  Initial: DMA sampling + fault gate + auto-recover
@@ -39,6 +33,21 @@
  *                          drops frames with > 16 saturated samples
  *                        - Baseline drift monitor (Err7 DRIFT): detects
  *                          gradual soot/moisture leakage on the probe
+ *   V1.4.0  2026-05-11  Field-data rebalance (strong flames -> 450 mV):
+ *                        - FAULT_FLOOR_MV lowered 500 -> 250 mV
+ *                        - ALL short-circuit checks now variance-gated
+ *                          (Err1 / Err6 / relative short) so strong
+ *                          flames are never mis-classified
+ *                        - New absolute-level Err6 check fires even in
+ *                          WAIT_BASELINE -- catches Monday-morning
+ *                          condensate shorts without IWDG reset loop
+ *                        - classifyAbsoluteShort() helper keeps
+ *                          evaluateFaultGate() under 20 lines
+ *   V1.5.0  2026-05-27  Simplified detection: fixed startup baseline (no
+ *                        EMA), FLAME_ON on 500 mV drop, FLAME_OFF at startup
+ *                        baseline with 1500 ms debounce.  Only Err6 retained
+ *                        (optional via ENABLE_VARIANCE_CHECK): drop > 500 mV
+ *                        + variance <= 100 LSB^2.  Err1-5/7 removed.
   ******************************************************************************
   */
 #include "flame.h"
@@ -62,20 +71,16 @@ static uint16_t  sampleBuffer[ADC_SAMPLE_COUNT];
 /* State and diagnostics -- written by main loop, read everywhere */
 static volatile flameState_t flameState         = FLAME_STATE_BLANKING;
 static          uint16_t     lastAdcMv          = 0U;
-static          uint16_t     baselineMv         = 3000U;
+static          uint16_t     lastVariance       = 0U;   /* diagnostic: last frame variance */
+static          uint16_t     startupBaselineMv  = 3000U; /* fixed at WAIT_BASELINE       */
 static          uint8_t      faultCode          = FAULT_CODE_NONE;
 static          int16_t      dieTempC           = 0;
 
 /* Counters owned by main loop (no ISR write) */
-static uint8_t   dvFaultCounter      = 0U;
 static uint8_t   baselineSampleIdx   = 0U;
 static uint32_t  baselineAccumulator = 0U;
 static uint8_t   diagRefreshCounter  = 0U;
 static uint32_t  cachedVddaMv        = 3300U;   /* refreshed every VDDA_REFRESH_PERIOD frames */
-
-/* Baseline drift monitoring (probe soot / moisture detection) */
-static uint16_t  baselineAtEntry     = 3000U;   /* baseline snapshot at NO_FLAME entry */
-static uint16_t  driftCheckCounter   = 0U;
 
 /* Counters incremented in SysTick ISR (volatile) */
 static volatile uint16_t flameOffCount   = 0U;  /* ms since hi-threshold cross */
@@ -232,8 +237,6 @@ static uint16_t computeTrimmedMean(void)
 
 /**
   * @brief  Compute sample variance over the trimmed middle section.
-  *         Real flame flicker yields variance >> MIN_FLAME_VARIANCE; a
-  *         shorted/wet probe yields near-zero variance.
   * @param  mean  Trimmed mean returned by computeTrimmedMean()
   * @retval Variance (clipped to UINT16_MAX)
   */
@@ -281,119 +284,49 @@ static uint16_t adcRawToMv(uint16_t raw, uint32_t vdda)
 /* -------------------------------------------------------------------------- */
 
 /**
-  * @brief  Check whether the current sample looks like a wet/partial short:
-  *         signal collapsed well below the live baseline AND variance died.
-  *         Gated on "baseline is trusted" so BLANKING / WAIT_BASELINE / FAULT
-  *         cannot spuriously trip it.
-  * @param  mv        Current mV reading
-  * @param  variance  Sample variance over trimmed window
-  * @param  state     Current flame state
-  * @retval 1 if relative-short pattern matches, 0 otherwise
-  */
-static uint8_t isRelativeShort(uint16_t     mv,
-                               uint16_t     variance,
-                               flameState_t state)
+ * @brief  True when current mV is more than FLAME_ON_DELTA_MV below the
+ *         fixed startup baseline.
+ * @param  mv  Current mV reading
+ * @retval 1 if flame-drop threshold met, 0 otherwise
+ */
+static uint8_t isFlameDropDetected(uint16_t mv)
 {
-    uint8_t baselineTrusted = (state == FLAME_STATE_NO_FLAME)
-                              || (state == FLAME_STATE_FLAME_ON)
-                              || (state == FLAME_STATE_CONFIRM_OFF);
-    if (!baselineTrusted)               { return 0U; }
-    if (baselineMv <= SHORT_DROP_MV)    { return 0U; }
-    if (mv >= (uint16_t)(baselineMv - SHORT_DROP_MV)) { return 0U; }
-    return (variance < MIN_FLAME_VARIANCE) ? 1U : 0U;
+    return (startupBaselineMv > (mv + FLAME_ON_DELTA_MV)) ? 1U : 0U;
 }
 
 /**
-  * @brief  Check for slow baseline drift caused by probe soot or moisture.
-  *         Called every frame while in NO_FLAME.  If the baseline has drifted
-  *         down by more than BASELINE_DRIFT_WARN_MV since entering NO_FLAME,
-  *         the probe needs maintenance.
-  * @retval FAULT_CODE_DRIFT if drift exceeded, FAULT_CODE_NONE otherwise
-  */
-static uint8_t checkBaselineDrift(void)
-{
-    if (flameState != FLAME_STATE_NO_FLAME) { return FAULT_CODE_NONE; }
-    driftCheckCounter++;
-    if (driftCheckCounter < DRIFT_CHECK_INTERVAL)  { return FAULT_CODE_NONE; }
-    driftCheckCounter = 0U;
-    if ((baselineAtEntry > baselineMv) &&
-        ((baselineAtEntry - baselineMv) > BASELINE_DRIFT_WARN_MV))
-    {
-        return FAULT_CODE_DRIFT;
-    }
-    return FAULT_CODE_NONE;
-}
-
-/**
-  * @brief  Decide whether the current cycle should trigger a fault.
-  *         Order matters: most-specific failure modes checked first so the
-  *         operator sees the most actionable Err code.
-  * @param  mv        Current trimmed-mean reading in mV
-  * @param  variance  Sample variance over trimmed window
-  * @param  vdda      Live VDDA in mV
-  * @param  state     Current flame state
-  * @retval Fault code (0 = no fault)
-  */
-static uint8_t evaluateFaultGate(uint16_t mv,
-                                 uint16_t variance,
-                                 uint32_t vdda,
+ * @brief  Optional false-flame (Err6) gate.  When ENABLE_VARIANCE_CHECK is 1,
+ *         a large voltage drop with near-zero variance latches FAULT Err6.
+ * @param  mv        Current trimmed-mean reading in mV
+ * @param  variance  Sample variance over trimmed window (LSB^2)
+ * @param  state     Current flame state
+ * @retval Fault code (0 = no fault)
+ */
+static uint8_t evaluateFaultGate(uint16_t     mv,
+                                 uint16_t     variance,
                                  flameState_t state)
 {
-    if (mv < FAULT_FLOOR_MV)    { return FAULT_CODE_FLOOR;   }
-    if (mv > FAULT_CEILING_MV)  { return FAULT_CODE_CEILING; }
-    if ((vdda < VDDA_MIN_MV) || (vdda > VDDA_MAX_MV))
+#if ENABLE_VARIANCE_CHECK
+    uint8_t baselineReady = (state == FLAME_STATE_NO_FLAME)
+                            || (state == FLAME_STATE_FLAME_ON)
+                            || (state == FLAME_STATE_CONFIRM_OFF);
+    if (baselineReady
+        && isFlameDropDetected(mv)
+        && (variance <= FALSE_FLAME_VAR_MAX))
     {
-        return FAULT_CODE_VDDA;
+        return FAULT_CODE_SHORT_REL;
     }
-    if (isRelativeShort(mv, variance, state)) { return FAULT_CODE_SHORT_REL; }
-    if (((state == FLAME_STATE_FLAME_ON) || (state == FLAME_STATE_CONFIRM_OFF))
-        && (variance < MIN_FLAME_VARIANCE))
-    {
-        return FAULT_CODE_VARIANCE;
-    }
+#else
+    (void)mv;
+    (void)variance;
+    (void)state;
+#endif
     return FAULT_CODE_NONE;
-}
-
-/**
-  * @brief  Track non-physical jumps in the signal.  Called on every cycle
-  *         except the very first, while in normal operating states.
-  * @param  mv  Current mV reading
-  * @retval 1 if dv-fault confirmed, 0 otherwise
-  */
-static uint8_t checkJumpFault(uint16_t mv)
-{
-    uint16_t dv = (mv > lastAdcMv) ? (mv - lastAdcMv) : (lastAdcMv - mv);
-    if (dv > MAX_DV_PER_CYCLE_MV)
-    {
-        dvFaultCounter++;
-        if (dvFaultCounter >= DV_FAULT_CONFIRM_COUNT)
-        {
-            return 1U;
-        }
-    }
-    else
-    {
-        dvFaultCounter = 0U;
-    }
-    return 0U;
 }
 
 /* -------------------------------------------------------------------------- */
 /*                       Baseline                                             */
 /* -------------------------------------------------------------------------- */
-
-/**
-  * @brief  Slow EMA of baseline -- only run while NO_FLAME confirmed.
-  *         tau ~ 32 cycles ~ 4 s.
-  * @param  mv  Current mV reading
-  * @retval None
-  */
-static void updateBaselineEma(uint16_t mv)
-{
-    uint32_t b = baselineMv;
-    b = b - (b >> BASELINE_EMA_SHIFT) + ((uint32_t)mv >> BASELINE_EMA_SHIFT);
-    baselineMv = (uint16_t)b;
-}
 
 /**
   * @brief  Reset baseline-capture accumulators when entering WAIT_BASELINE.
@@ -427,7 +360,7 @@ static uint8_t accumulateBaseline(uint16_t mv)
     baselineSampleIdx++;
     if (baselineSampleIdx >= BASELINE_INIT_SAMPLES)
     {
-        baselineMv = (uint16_t)(baselineAccumulator / BASELINE_INIT_SAMPLES);
+        startupBaselineMv = (uint16_t)(baselineAccumulator / BASELINE_INIT_SAMPLES);
         return 1U;
     }
     return 0U;
@@ -451,11 +384,6 @@ static void changeState(flameState_t newState)
     if (newState == FLAME_STATE_WAIT_BASELINE)
     {
         resetBaselineCapture();
-    }
-    if (newState == FLAME_STATE_NO_FLAME)
-    {
-        baselineAtEntry    = baselineMv;
-        driftCheckCounter  = 0U;
     }
 }
 
@@ -487,63 +415,48 @@ static void handleStateWaitBaseline(uint16_t mv)
 }
 
 /**
-  * @brief  NO_FLAME -- slow-update baseline; declare FLAME_ON if signal
-  *         drops by >= ON_DELTA AND has flame-typical variance.
-  * @param  mv        Current mV reading
-  * @param  variance  Sample variance
+  * @brief  NO_FLAME -- declare FLAME_ON when signal drops > 500 mV below
+  *         the fixed startup baseline (Err6 gate runs before this state).
+  * @param  mv  Current mV reading
   * @retval None
   */
-static void handleStateNoFlame(uint16_t mv, uint16_t variance)
+static void handleStateNoFlame(uint16_t mv)
 {
-    updateBaselineEma(mv);
-
-    uint16_t onThreshold = (baselineMv > FLAME_ON_DELTA_MV)
-                          ? (uint16_t)(baselineMv - FLAME_ON_DELTA_MV)
-                          : 0U;
-
-    if ((mv < onThreshold) && (variance >= MIN_FLAME_VARIANCE))
+    if (isFlameDropDetected(mv))
     {
         changeState(FLAME_STATE_FLAME_ON);
     }
 }
 
 /**
-  * @brief  FLAME_ON -- if signal climbs above OFF threshold, enter
+  * @brief  FLAME_ON -- if signal recovers to startup baseline, enter
   *         CONFIRM_OFF and start the de-bounce timer.
   * @param  mv  Current mV reading
   * @retval None
   */
 static void handleStateFlameOn(uint16_t mv)
 {
-    uint16_t offThreshold = (baselineMv > FLAME_OFF_DELTA_MV)
-                           ? (uint16_t)(baselineMv - FLAME_OFF_DELTA_MV)
-                           : 0U;
-
-    if (mv >= offThreshold)
+    if (mv >= startupBaselineMv)
     {
         changeState(FLAME_STATE_CONFIRM_OFF);
     }
 }
 
 /**
-  * @brief  CONFIRM_OFF -- if signal drops back below ON_DELTA, return to
-  *         FLAME_ON.  If above OFF_DELTA for FLAME_OFF_TIMEOUT_MS, declare
-  *         flame extinguished.
+  * @brief  CONFIRM_OFF -- if drop re-appears, return to FLAME_ON.  If mv
+  *         stays at or above startup baseline for FLAME_OFF_TIMEOUT_MS,
+  *         declare flame extinguished.
   * @param  mv  Current mV reading
   * @retval None
   */
 static void handleStateConfirmOff(uint16_t mv)
 {
-    uint16_t onThreshold  = (baselineMv > FLAME_ON_DELTA_MV)
-                           ? (uint16_t)(baselineMv - FLAME_ON_DELTA_MV)
-                           : 0U;
-
-    if (mv < onThreshold)
+    if (isFlameDropDetected(mv))
     {
         changeState(FLAME_STATE_FLAME_ON);
         return;
     }
-    if (flameOffCount >= FLAME_OFF_TIMEOUT_MS)
+    if ((mv >= startupBaselineMv) && (flameOffCount >= FLAME_OFF_TIMEOUT_MS))
     {
         changeState(FLAME_STATE_NO_FLAME);
     }
@@ -555,6 +468,52 @@ static void handleStateConfirmOff(uint16_t mv)
 /* -------------------------------------------------------------------------- */
 /*                       Output drivers                                       */
 /* -------------------------------------------------------------------------- */
+
+/**
+  * @brief  Compress a value into the 4-digit 0..9999 range by dividing
+  *         by 10 at most twice.  Used by the diagnostic display to fit
+  *         large variance readings (observed up to ~1e4 on field hardware)
+  *         into the TM1650 4-digit field.  Up to two /10 passes cover
+  *         values up to ~1e6, which exceeds the uint16_t domain anyway.
+  * @param  v  Raw value (uint16_t; 0..65535)
+  * @retval Value guaranteed to be <= 9999
+  */
+#if DIAG_SHOW_VARIANCE
+static uint16_t compressTo9999(uint16_t v)
+{
+    if (v <= 9999U) { return v; }
+    v = (uint16_t)(v / 10U);
+    if (v <= 9999U) { return v; }
+    return 9999U;
+}
+#endif
+
+/**
+  * @brief  Emit one display frame during normal operation.
+  *         Diagnostic mode: variance shown continuously (trailing decimal
+  *         point); mV shown for DIAG_MV_FRAMES (~1 s) once every
+  *         DIAG_CYCLE_FRAMES (~5 s).  Production mode: always shows mV.
+  *         FAULT display is handled by the caller and always takes priority.
+  * @param  mv  Current mV reading
+  * @retval None
+  */
+static void emitNormalDisplay(uint16_t mv)
+{
+#if DIAG_SHOW_VARIANCE
+    static uint8_t diagFrame = 0U;
+    if (++diagFrame >= DIAG_CYCLE_FRAMES) { diagFrame = 0U; }
+    if (diagFrame < DIAG_MV_FRAMES)
+    {
+        tm1650ShowValue(mv);
+    }
+    else
+    {
+        tm1650ShowValueDp(compressTo9999(lastVariance));
+    }
+#else
+    tm1650ShowValue(mv);
+#endif
+}
 
 /**
   * @brief  Drive relay + LED + display based on the current state.
@@ -583,7 +542,7 @@ static void driveOutputs(uint16_t mv)
         HAL_GPIO_WritePin(RELAY_PORT, RELAY_PIN, GPIO_PIN_RESET);
         HAL_GPIO_WritePin(LED_PORT,   LED_PIN,   GPIO_PIN_SET);   /* LED OFF */
     }
-    tm1650ShowValue(mv);
+    emitNormalDisplay(mv);
 }
 
 /* -------------------------------------------------------------------------- */
@@ -594,14 +553,12 @@ void flameInit(void)
 {
     flameState          = FLAME_STATE_BLANKING;
     lastAdcMv           = 0U;
-    baselineMv          = 3000U;
+    lastVariance        = 0U;
+    startupBaselineMv   = 3000U;
     faultCode           = FAULT_CODE_NONE;
     dieTempC            = 0;
-    dvFaultCounter      = 0U;
     diagRefreshCounter  = 0U;
     cachedVddaMv        = 3300U;
-    baselineAtEntry     = 3000U;
-    driftCheckCounter   = 0U;
     resetBaselineCapture();
 
     flameOffCount   = 0U;
@@ -631,20 +588,19 @@ static void refreshDiagnosticsIfDue(void)
 
 /**
   * @brief  Run normal (non-FAULT) state-machine dispatch.
-  * @param  mv        Current mV reading
-  * @param  variance  Sample variance (gates flame entry)
+  * @param  mv  Current mV reading
   * @retval None
   */
-static void dispatchNormalState(uint16_t mv, uint16_t variance)
+static void dispatchNormalState(uint16_t mv)
 {
     switch (flameState)
     {
-        case FLAME_STATE_BLANKING:      handleStateBlanking();             break;
-        case FLAME_STATE_WAIT_BASELINE: handleStateWaitBaseline(mv);       break;
-        case FLAME_STATE_NO_FLAME:      handleStateNoFlame(mv, variance);  break;
-        case FLAME_STATE_FLAME_ON:      handleStateFlameOn(mv);            break;
-        case FLAME_STATE_CONFIRM_OFF:   handleStateConfirmOff(mv);         break;
-        default:                                                            break;
+        case FLAME_STATE_BLANKING:      handleStateBlanking();       break;
+        case FLAME_STATE_WAIT_BASELINE: handleStateWaitBaseline(mv); break;
+        case FLAME_STATE_NO_FLAME:      handleStateNoFlame(mv);      break;
+        case FLAME_STATE_FLAME_ON:      handleStateFlameOn(mv);      break;
+        case FLAME_STATE_CONFIRM_OFF:   handleStateConfirmOff(mv);   break;
+        default:                                                     break;
     }
 }
 
@@ -685,30 +641,17 @@ void flameProcess(void)
     adcStats_t stats = computeStatistics();
 
     uint16_t mv = adcRawToMv(stats.meanRaw, cachedVddaMv);
+    lastVariance = stats.varianceRaw;
 
-    /* Jump fault is its own check (can override the gate's verdict) */
-    uint8_t newFault = evaluateFaultGate(mv,
-                                         stats.varianceRaw,
-                                         cachedVddaMv,
-                                         flameState);
-    if ((newFault == FAULT_CODE_NONE) && (lastAdcMv != 0U))
-    {
-        if (checkJumpFault(mv))
-        {
-            newFault = FAULT_CODE_JUMP;
-        }
-    }
+#if DISABLE_FAULT_GATE
+    uint8_t newFault = FAULT_CODE_NONE;   /* TEST MODE: fault gate bypassed */
+#else
+    uint8_t newFault = evaluateFaultGate(mv, stats.varianceRaw, flameState);
+#endif
 
     if (maybeEnterFault(newFault) == 0U)
     {
-        dispatchNormalState(mv, stats.varianceRaw);
-
-        /* Baseline drift check (only active in NO_FLAME) */
-        uint8_t driftFault = checkBaselineDrift();
-        if (driftFault != FAULT_CODE_NONE)
-        {
-            (void)maybeEnterFault(driftFault);
-        }
+        dispatchNormalState(mv);
     }
 
     lastAdcMv = mv;
@@ -744,6 +687,7 @@ void flameTickCallback(void)
 
 flameState_t flameGetState(void)       { return flameState;  }
 uint16_t     flameGetLastMv(void)      { return lastAdcMv;   }
-uint16_t     flameGetBaselineMv(void)  { return baselineMv;  }
+uint16_t     flameGetLastVariance(void){ return lastVariance;}
+uint16_t     flameGetBaselineMv(void)  { return startupBaselineMv; }
 uint8_t      flameGetFaultCode(void)   { return faultCode;   }
 int16_t      flameGetDieTempC(void)    { return dieTempC;    }
