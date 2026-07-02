@@ -25,6 +25,7 @@ int main(void)
     for (;;)
     {
         wdiFeedToggle();
+        spiSlaveService();
         furnaceTempC = ads1220PortReadTempC(&stat);
         hostBuildResponse(&response, furnaceTempC, stat);
         spiSlaveSetResponse(&response);

@@ -11,10 +11,11 @@ M2    := $(abspath $(HERE)/..)
 UNITY := $(HERE)/unity/unity.c
 BUILD := $(HERE)/build
 
-INC := -I$(HERE)/unity -I$(M2)/config -I$(M2)/protocol -I$(M2)/utils -I$(M2)/ads1220
+INC := -I$(HERE)/unity -I$(M2)/config -I$(M2)/protocol -I$(M2)/utils -I$(M2)/ads1220 \
+       -I$(M2)/spi
 
 BINS := $(BUILD)/testHostProtocol $(BUILD)/testTempCalib $(BUILD)/testTempFilter \
-        $(BUILD)/testAds1220Reading
+        $(BUILD)/testAds1220Reading $(BUILD)/testSpiFraming
 
 .PHONY: test clean
 test: $(BINS)
@@ -22,6 +23,7 @@ test: $(BINS)
 	@echo "== tempCalib =="     && $(BUILD)/testTempCalib
 	@echo "== tempFilter =="    && $(BUILD)/testTempFilter
 	@echo "== ads1220Reading ==" && $(BUILD)/testAds1220Reading
+	@echo "== spiFraming =="    && $(BUILD)/testSpiFraming
 	@echo "ALL TEST SUITES PASSED"
 
 $(BUILD):
@@ -37,6 +39,9 @@ $(BUILD)/testTempFilter: $(HERE)/testTempFilter.c $(M2)/utils/tempFilter.c $(UNI
 	$(CC) $(CFLAGS) $(INC) $^ -o $@
 
 $(BUILD)/testAds1220Reading: $(HERE)/testAds1220Reading.c $(M2)/ads1220/ads1220Reading.c $(UNITY) | $(BUILD)
+	$(CC) $(CFLAGS) $(INC) $^ -o $@
+
+$(BUILD)/testSpiFraming: $(HERE)/testSpiFraming.c $(M2)/spi/spiFraming.c $(UNITY) | $(BUILD)
 	$(CC) $(CFLAGS) $(INC) $^ -o $@
 
 clean:
