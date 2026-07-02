@@ -86,16 +86,32 @@ main.c
 
 > `ads1220Port.c` 用 `_Aligned` 编译期断言锁定这四个字节，配置漂移即编译失败。
 
-### 4.3 `spiSlave` — G070 独有
+### 4.3 `spiSlave` + `spiFraming` — G070 独有
 
 | API | 行为 |
 |-----|------|
-| `spiSlaveInit()` | SPI1 Slave Mode0, PA4–7 |
+| `spiSlaveInit()` | SPI1 Slave Mode0, PA4–7；**NSS 双沿 EXTI**；arm 首帧（预装字节0） |
+| `spiSlaveService()` | 主循环调用；执行待处理的 abort+re-arm（帧复位） |
 | `spiSlaveGetHandle()` | 供 SPI1_IRQHandler 取 HAL 句柄 |
-| `spiSlaveSetResponse()` | 写入下一帧 TX 缓冲 |
+| `spiSlaveSetResponse()` | 写入下一帧 TX 缓冲（临界区，非活动时才更新，防撕裂） |
 | `spiSlaveFrameComplete()` | 读取并清除“帧完成”标志 |
 
 主机侧 **无** 对应模块（主机为 PE7–10 位 bang 主模式）。
+
+#### 帧对齐与自愈（关键）
+
+主机靠 **CS(NSS) 上升沿** 触发自愈——副芯片必须在上升沿重新对齐字节索引，否则主机
+一次有效帧都收不到。`spiFraming` 纯状态机（可单测）+ `spiSlave` HAL 实现：
+
+- **首字节常驻预装**：`HAL_SPI_TransmitReceive_IT(5)` 始终 armed，字节0（固定 `0x68` 帧头）
+  在 CS 到来前已进移位寄存器，避免 20µs setup 窗口内临时装载的抖动风险。
+- **NSS 下降沿**：标记事务开始（`transactionActive=1`）。
+- **NSS 上升沿**：若事务未完成（半帧/位滑/中止）→ 置 `resyncPending`；主循环
+  `spiSlaveService()` 执行 `HAL_SPI_Abort` + 重新 arm，从字节0 复位 → 主机下一帧即可对齐。
+- **传输完成**：解析帧 + 置 `frameReady`，并立即连续 re-arm（状态 READY，无需 abort）。
+- **总线错误(OVR等)**：置 `resyncPending`，同上自愈。
+- **防 TX 撕裂**：`spiSlaveSetResponse()` 仅在事务非活动时更新 `gTxFrame`（临界区保护）；
+  字节0 恒为 `0x68`，字节1–4 整体一致。
 
 ## 5. 主循环伪代码
 
@@ -110,8 +126,9 @@ int main(void)
     for (;;)
     {
         wdiFeedToggle();                    /* PB0 ~500ms */
-        furnaceTempC = ads1220PortReadTempC();
-        hostBuildResponse(&txFrame, furnaceTempC, HOST_STAT_OK);
+        spiSlaveService();                  /* 待处理帧复位 abort+re-arm */
+        furnaceTempC = ads1220PortReadTempC(&stat);
+        hostBuildResponse(&txFrame, furnaceTempC, stat);
         spiSlaveSetResponse(&txFrame);
 
         if (spiSlaveFrameComplete())
@@ -131,14 +148,16 @@ int main(void)
 
 主机 V1 **不解析 STAT**，仅用于逻辑分析仪/副芯片调试。
 
-## 7. 待实现清单（CubeMX 生成后填入）
+## 7. 实现状态
 
-- [ ] `system_stm32g0xx.c` / `startup_stm32g070xx.s`
-- [ ] `stm32g0xx_hal_msp.c` — SPI1 GPIO AF
-- [ ] `spiSlave.c` — HAL_SPI 从机 + NSS  EXTI
-- [ ] `ads1220Port.c` — 从主工程精简位 bang 时序
-- [ ] `STM32G070CBTx_FLASH.ld`
+- [x] `system_stm32g0xx.c` / `startup_stm32g070xx.s`
+- [x] `stm32g0xx_hal_msp.c` — SPI1 GPIO AF
+- [x] `spiSlave.c` — HAL_SPI 从机 + **NSS 双沿 EXTI + 上升沿复位 + 首字节预装 + 自愈**
+- [x] `ads1220Port.c` — 位 bang 时序 + 断线检测(A1) + 寄存器对齐主机(0x68/0x04/0x55/0x70)
+- [x] `STM32G070CBT6.ld`
+- [x] GCC 交叉编译（`MCU2_G070/Makefile` / `build_mcu2_gcc.bat`）
 - [ ] OpenOCD / ST-Link 烧录脚本
+- [ ] A2 看门狗存活解耦（主循环刷新 + SysTick 条件喂狗）
 
 ## 8. 测试阶段
 
