@@ -1,11 +1,41 @@
 /**
  * @file    tempCalib.c
- * @brief   Lookup-table temperature conversion from bsp_adc.c adcProcessSmokeAds1220
+ * @brief   Lookup-table furnace-temperature conversion (ADS1220 raw -> deg C).
+ * @details Ported from the D380 master bsp_adc.c adcProcessSmokeAds1220(); the
+ *          table, scaling factors and empirical trim are kept numerically
+ *          identical to the master so both MCUs agree on the temperature.
+ * @author  Cursor Agent
+ * @date    2026-07-02
+ * @version 1.1.0  De-magic: physics/threshold constants named; math unchanged.
  */
 #include "tempCalib.h"
 #include "../protocol/hostProtocol.h"
 
-static const uint16 kAdcCalib[221] = {
+/* --- ADS1220 front-end scaling (drives raw code -> millivolt -> table code) --- */
+#define ADC_FULL_SCALE_CODE       8388607.0f /* 2^23 - 1: 24-bit signed full scale  */
+#define ADC_VREF_MILLIVOLT        2000.0f    /* external reference, millivolts       */
+#define ADC_PGA_GAIN              16.0f      /* Reg0 PGA gain = x16                   */
+#define ADC_FRONTEND_DIVIDER      0.5f       /* sensor front-end divide (bsp_adc.c)   */
+#define CALIB_CODE_CENTI_SCALE    100.0f     /* scale to the table's centi-unit code  */
+
+/* --- Calibration table geometry (kAdcCalib) --- */
+#define CALIB_TABLE_LEN           221U       /* 22 decades * 10 + 1 boundary entry    */
+#define CALIB_ENTRIES_PER_DECADE  10U        /* codes per 100 * 0.1 deg C decade row  */
+#define CALIB_MAX_DECADE_INDEX    20U        /* highest decade scanned (see loop)     */
+#define CALIB_TENTHC_PER_DECADE   100U       /* 0.1 deg C units spanned by one decade */
+#define CALIB_TENTHC_PER_STEP     10U        /* 0.1 deg C units per intra-decade step */
+#define CALIB_INTERP_SCALE        10U        /* fixed-point scale for sub-step interp */
+#define CALIB_UNDERRANGE_CODE     9126U      /* codes in (this, table[0]) -> 0 deg C   */
+#define CALIB_OVERRANGE_TENTHC    9999U      /* code above the table -> over-range     */
+
+/* --- Result post-processing (all in 0.1 deg C unless noted) --- */
+#define CALIB_OFFSET_GATE_TENTHC  100U       /* apply trim only above 10.0 deg C       */
+#define CALIB_OFFSET_TRIM_TENTHC  25U        /* empirical -2.5 deg C trim (bsp_adc.c)  */
+#define TEMP_TENTHC_DISCONNECT    9000U      /* > 900.0 deg C => probe disconnected    */
+#define TENTHC_PER_DEGREE         10U        /* 0.1 deg C units per whole degree        */
+#define TEMP_VALID_MAX_C          390U       /* above => clamp to HOST_TEMP_CLAMP_MAX   */
+
+static const uint16 kAdcCalib[CALIB_TABLE_LEN] = {
     10000, 10039, 10078, 10117, 10156, 10195, 10234, 10273, 10312, 10351,
     10390, 10429, 10468, 10507, 10546, 10585, 10624, 10663, 10702, 10740,
     10779, 10818, 10857, 10896, 10935, 10973, 11012, 11051, 11090, 11129,
@@ -31,44 +61,62 @@ static const uint16 kAdcCalib[221] = {
     18319,
 };
 
+/**
+ * @brief  Linear sub-step interpolation, returning the 0.1 deg C remainder.
+ * @param  value Offset of the code above the lower table entry.
+ * @param  span  Code distance between the two bracketing table entries.
+ * @return Interpolated fraction in [0, CALIB_INTERP_SCALE) as 0.1 deg C units.
+ */
 static uint16 tempCalibGetDot(uint16 value, uint16 span)
 {
     if (span == 0U)
         return 0U;
-    return (uint16)((value * 10U) / span);
+    return (uint16)((value * CALIB_INTERP_SCALE) / span);
 }
 
+/**
+ * @brief  Resolve a code within one decade row into 0.1 deg C.
+ * @param  value  Quantized ADC code known to fall inside this decade.
+ * @param  decade Decade index (row = decade * CALIB_ENTRIES_PER_DECADE).
+ * @return Temperature in 0.1 deg C, or 0 if no bracketing pair matched.
+ */
 static uint16 tempCalibDecadeLookup(uint16 value, uint8 decade)
 {
-    uint16 base = (uint16)(decade * 100U);
-    const uint16 *row = &kAdcCalib[decade * 10U];
+    uint16 base = (uint16)(decade * CALIB_TENTHC_PER_DECADE);
+    const uint16 *row = &kAdcCalib[decade * CALIB_ENTRIES_PER_DECADE];
     uint8 i;
 
-    for (i = 0U; i < 10U; i++)
+    for (i = 0U; i < CALIB_ENTRIES_PER_DECADE; i++)
     {
         uint16 lo = row[i];
         uint16 hi = row[i + 1U];
         if (value >= lo && value < hi)
-            return (uint16)(base + (uint16)(i * 10U) +
+            return (uint16)(base + (uint16)(i * CALIB_TENTHC_PER_STEP) +
                             tempCalibGetDot((uint16)(value - lo), (uint16)(hi - lo)));
     }
     return 0U;
 }
 
+/**
+ * @brief  Map a quantized ADC code to 0.1 deg C via the calibration table.
+ * @param  value Quantized ADC code (see tempCalibRawToTempC scaling).
+ * @return 0 when just below the table, CALIB_OVERRANGE_TENTHC when above it,
+ *         otherwise the interpolated temperature in 0.1 deg C.
+ */
 static uint16 tempCalibFromQuantized(uint16 value)
 {
     uint8 decade;
 
-    if (value > 9126U && value < kAdcCalib[0])
+    if (value > CALIB_UNDERRANGE_CODE && value < kAdcCalib[0])
         return 0U;
-    for (decade = 0U; decade <= 20U; decade++)
+    for (decade = 0U; decade <= CALIB_MAX_DECADE_INDEX; decade++)
     {
-        uint16 lo = kAdcCalib[decade * 10U];
-        uint16 hi = kAdcCalib[(decade + 1U) * 10U];
+        uint16 lo = kAdcCalib[decade * CALIB_ENTRIES_PER_DECADE];
+        uint16 hi = kAdcCalib[(decade + 1U) * CALIB_ENTRIES_PER_DECADE];
         if (value >= lo && value < hi)
             return tempCalibDecadeLookup(value, decade);
     }
-    return 9999U;
+    return CALIB_OVERRANGE_TENTHC;
 }
 
 uint16 tempCalibRawToTempC(int32_t raw, uint8 *readOk)
@@ -80,20 +128,26 @@ uint16 tempCalibRawToTempC(int32_t raw, uint8 *readOk)
 
     if (raw < 0)
         raw = 0;
-    scaled = ((float)raw / 8388607.0f) * 2000.0f;
-    scaled = scaled / 16.0f / 0.5f;
-    quantized = (uint32_t)(scaled * 100.0f);
+    /* raw code -> input millivolts -> sensor units -> table's centi-unit code. */
+    scaled = ((float)raw / ADC_FULL_SCALE_CODE) * ADC_VREF_MILLIVOLT;
+    scaled = scaled / ADC_PGA_GAIN / ADC_FRONTEND_DIVIDER;
+    quantized = (uint32_t)(scaled * CALIB_CODE_CENTI_SCALE);
+
     lookupTenthC = tempCalibFromQuantized((uint16)quantized);
-    if (lookupTenthC > 100U)
-        lookupTenthC = (uint16)(lookupTenthC - 25U);
-    if (lookupTenthC > 9000U)
+    /* Empirical calibration trim carried over from the master bsp_adc.c: above
+     * 10.0 deg C the table reads ~2.5 deg C high, so subtract the fixed trim.
+     * Do NOT change without re-characterising against a reference thermometer. */
+    if (lookupTenthC > CALIB_OFFSET_GATE_TENTHC)
+        lookupTenthC = (uint16)(lookupTenthC - CALIB_OFFSET_TRIM_TENTHC);
+
+    if (lookupTenthC > TEMP_TENTHC_DISCONNECT)
     {
         if (readOk != NULL)
             *readOk = 0U;
         return HOST_TEMP_DISCONNECT;
     }
-    tempC = (uint16)(lookupTenthC / 10U);
-    if (tempC > 390U)
+    tempC = (uint16)(lookupTenthC / TENTHC_PER_DEGREE);
+    if (tempC > TEMP_VALID_MAX_C)
         tempC = HOST_TEMP_CLAMP_MAX;
     if (readOk != NULL)
         *readOk = 1U;
