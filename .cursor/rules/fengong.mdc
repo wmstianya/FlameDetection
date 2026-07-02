@@ -1,0 +1,171 @@
+---
+description: >
+  STM32 FlameDetection 项目分工规范 (206团队)
+  定义各模块的职责边界、负责层级和协作接口，供 Cursor AI 在代码生成时严格遵守。
+globs:
+  - "Src/**/*.c"
+  - "Src/**/*.h"
+alwaysApply: true
+---
+
+# FlameDetection 项目分工 (206 Team Skill Division)
+
+## 总体架构分层
+
+本项目采用四层架构，每层职责清晰、互不侵入：
+
+```
+┌─────────────────────────────────────────────┐
+│  application/   业务逻辑层  (火焰状态机)       │
+├─────────────────────────────────────────────┤
+│  utils/         算法工具层  (滤波算法)          │
+├─────────────────────────────────────────────┤
+│  drivers/       硬件驱动层  (ADC/DMA 抽象)     │
+├─────────────────────────────────────────────┤
+│  config/        配置管理层  (全局参数中心)      │
+└─────────────────────────────────────────────┘
+```
+
+---
+
+## 模块分工详情
+
+### 1. config/ — 配置管理层
+
+**负责范围**
+- `Src/config/systemConfig.h` / `systemConfig.c`
+- 全局编译期常量（宏定义）与运行期配置结构体（`SystemConfig`）
+
+**职责边界**
+- 所有可调参数必须在此层集中定义，禁止在其他层出现魔术数字
+- 只向上层导出常量和类型，不依赖任何驱动或业务逻辑头文件
+- 变更任何阈值或时序参数时，只改此层，其他层零改动
+
+**关键常量归属**
+| 常量 | 含义 |
+|------|------|
+| `FLAME_THRESH_LOW_MV` / `FLAME_THRESH_HIGH_MV` | 迟滞阈值 |
+| `TASK_*_PERIOD_MS` | 调度周期 |
+| `ADC_USE_DMA_MODE` | DMA/轮询切换 |
+| `TEMP_COMP_ENABLE` / `AUTO_K_ENABLE` | 功能开关 |
+
+---
+
+### 2. drivers/ — 硬件驱动层
+
+**负责范围**
+- `Src/drivers/adcDriver.h` / `adcDriver.c` — 轮询模式 ADC 驱动
+- `Src/drivers/adcDriverDma.h` / `adcDriverDma.c` — DMA 模式 ADC 驱动
+
+**职责边界**
+- 封装所有 STM32 HAL API 调用；上层严禁直接调用 `HAL_ADC_*`
+- 通过 `ADC_USE_DMA_MODE` 宏在编译期切换实现，接口保持一致
+- 返回值统一使用 `AdcStatus` 枚举，禁止返回裸整数错误码
+- 只依赖 `config/` 层；禁止包含 `application/` 或 `utils/` 头文件
+
+**核心 API**
+```c
+void      adcDriverInit(void);
+AdcStatus adcGetVddaSafe(float* vdda);
+AdcStatus adcReadFlameSensorAverage(float* avgValue);
+AdcStatus adcReadTemperatureSafe(int16_t* tempX10);
+float     adcConvertToMillivolts(float adcCounts, float vdda);
+```
+
+---
+
+### 3. utils/ — 算法工具层
+
+**负责范围**
+- `Src/utils/filter.h` / `filter.c` — IIR / 滑动平均 / 中值滤波
+
+**职责边界**
+- 纯算法实现，与硬件和业务完全解耦；零 HAL 依赖
+- 所有状态通过结构体（`IirFilter`、`MovingAvgFilter`）封装，禁止全局变量
+- 只依赖标准 C 库和 `stdint.h`，不包含任何项目自定义头文件
+
+**核心 API**
+```c
+void    filterIirInit(IirFilter* filter, float alpha);
+float   filterIirUpdate(IirFilter* filter, float newSample);
+void    filterMovingAvgInit(MovingAvgFilter* filter, int16_t* buffer, uint8_t size);
+int16_t filterMovingAvgUpdate(MovingAvgFilter* filter, int16_t newSample);
+```
+
+---
+
+### 4. application/ — 业务逻辑层
+
+**负责范围**
+- `Src/application/flameDetector.h` / `flameDetector.c`
+- 火焰检测状态机：`INIT → STARTUP_DELAY → DETECTED → LOST_DEBOUNCE → LOST_CONFIRMED`
+
+**职责边界**
+- 调用 `drivers/` 获取传感器数据，调用 `utils/` 做信号处理
+- 所有状态通过 `FlameDetector` 结构体封装，禁止全局裸变量
+- GPIO 输出（LED / 继电器）只在本层 `flameDetectorApplyOutputs()` 中操作
+- 不得直接读写 ADC 寄存器或调用 HAL API
+
+**核心 API**
+```c
+void flameDetectorInit(FlameDetector* detector, const SystemConfig* config);
+void flameDetectorUpdate(FlameDetector* detector, uint32_t voltageMv, uint32_t nowMs);
+uint8_t flameDetectorIsFlamePresent(const FlameDetector* detector);
+void flameDetectorApplyOutputs(const FlameDetector* detector);
+```
+
+---
+
+### 5. main.c — 调度入口
+
+**负责范围**
+- 协作式任务调度器（6 个 `task*` 函数）
+- 系统初始化顺序
+
+**职责边界**
+- 只负责时序调度，禁止在此文件内直接操作硬件寄存器或实现检测算法
+- 新业务逻辑必须下沉到对应层，而非堆积在 `main.c`
+
+**调度任务**
+| 任务 | 周期 | 所属职责 |
+|------|------|---------|
+| `taskAdcSample` | 10 ms | 采集火焰传感器原始值 |
+| `taskTempSense` | 200 ms | 采集内部温度 + IIR 滤波 |
+| `taskCompensateAndAdapt` | 200 ms | 温度补偿 + Auto-K 自适应 |
+| `taskControl` | 20 ms | 迟滞判断 + GPIO 输出 |
+| `taskDisplay` | 50 ms | TM1650 显示刷新 |
+| `taskWatchdog` | 100 ms | IWDG 喂狗 |
+
+---
+
+## 跨层依赖规则
+
+```
+application  →  drivers, utils, config   ✅
+utils        →  config (只读常量)         ✅
+drivers      →  config                   ✅
+config       →  (无依赖)                  ✅
+
+application  →  HAL 直接调用             ❌
+utils        →  drivers / application    ❌
+drivers      →  application / utils      ❌
+```
+
+---
+
+## 命名与编码约束（AI 必须遵守）
+
+- 所有函数、变量使用 **camelCase**，禁止下划线命名（GPIO 宏除外）
+- 禁止数字后缀（如 `adcInit1`），改用语义前缀（如 `adcDmaInit`）
+- 每函数不超过 **20 行**；超出时拆分子函数
+- 每次新增常量必须定义在 `config/systemConfig.h`，禁止魔术数字
+- 全局变量必须加 `static`（跨文件 API 除外）
+- `while` 等待循环必须有超时退出条件，禁止死等
+
+---
+
+## 版本信息
+
+| 版本 | 日期 | 变更 |
+|------|------|------|
+| V1.0.0 | 2026-07-02 | 初始分工文档，基于 V1.0.5 代码结构 |
