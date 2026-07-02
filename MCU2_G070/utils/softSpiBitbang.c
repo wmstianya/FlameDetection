@@ -1,16 +1,28 @@
 /**
  * @file    softSpiBitbang.c
- * @brief   ADS1220 soft SPI Mode 1 (CPOL=0, CPHA=1) — matches ADS1220.h on F103
+ * @brief   ADS1220 soft SPI Mode 1 (CPOL=0, CPHA=1); matches ADS1220.h on F103.
+ * @author  Cursor Agent
+ * @date    2026-07-02
+ * @version 1.1.0  Documented the busy-wait cycle model.
  */
 #include "softSpiBitbang.h"
 #include "../config/mcu2Pins.h"
 #include "stm32g0xx_hal.h"
 
 #define SOFT_SPI_EDGE_DELAY_US   20U
+#define CYCLES_PER_US            (SystemCoreClock / 1000000U)
+#define BUSY_LOOP_CYCLE_COST     3U   /* approx. cycles per decrement+NOP iter */
 
+/**
+ * @brief  Coarse busy-wait used to shape the bit-bang half-period.
+ * @param  us Approximate delay in microseconds.
+ * @return None.
+ * @note   Bounded loop (no watchdog concern); accuracy is not critical because
+ *         the ADS1220 tolerates a wide clock range.
+ */
 static void softSpiDelayUs(uint32_t us)
 {
-    uint32_t count = (SystemCoreClock / 1000000U) * us / 3U;
+    uint32_t count = (CYCLES_PER_US * us) / BUSY_LOOP_CYCLE_COST;
     while (count > 0U)
     {
         count--;

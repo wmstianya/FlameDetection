@@ -1,6 +1,9 @@
 /**
  * @file    stm32g0xx_hal_msp.c
- * @brief   MCU2 HAL MSP — SPI1
+ * @brief   MCU2 HAL MSP: SPI1 clock/GPIO bring-up.
+ * @author  Cursor Agent
+ * @date    2026-07-02
+ * @version 1.1.0
  */
 #include "stm32g0xx_hal.h"
 

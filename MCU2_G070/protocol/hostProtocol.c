@@ -1,6 +1,9 @@
 /**
  * @file    hostProtocol.c
- * @brief   5-byte SPI protocol — aligned with UART/HARDWARE/led/bsp_led.c
+ * @brief   5-byte SPI protocol, aligned with the master UART/HARDWARE/led/bsp_led.c.
+ * @author  Cursor Agent
+ * @date    2026-07-02
+ * @version 1.1.0  Added API documentation (behaviour unchanged).
  */
 #include "hostProtocol.h"
 

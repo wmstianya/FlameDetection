@@ -1,6 +1,9 @@
 /**
  * @file    boardInit.c
- * @brief   HSE 64 MHz, indicator GPIO, WDI feed and LED heartbeat
+ * @brief   HSE-based 64 MHz clock, indicator GPIO, WDI feed and LED heartbeat.
+ * @author  Cursor Agent
+ * @date    2026-07-02
+ * @version 1.1.0  Documentation and clock-config comments.
  */
 #include "boardInit.h"
 #include "../config/mcu2Types.h"
@@ -55,6 +58,7 @@ static void boardClockConfig(void)
     RCC_OscInitTypeDef osc = {0};
     RCC_ClkInitTypeDef clk = {0};
 
+    /* HSE 8 MHz / M(1) * N(16) / R(2) = 64 MHz SYSCLK (PLLR feeds the system). */
     HAL_PWREx_ControlVoltageScaling(PWR_REGULATOR_VOLTAGE_SCALE1);
     osc.OscillatorType = RCC_OSCILLATORTYPE_HSE;
     osc.HSEState = RCC_HSE_ON;
