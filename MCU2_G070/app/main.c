@@ -1,11 +1,14 @@
 /**
  * @file    main.c
- * @brief   U31 MCU2 entry — SPI slave furnace temperature to U13 F103
+ * @brief   U31 MCU2 entry: SPI-slave furnace-temperature bridge to the U13 F103.
+ * @author  Cursor Agent
+ * @date    2026-07-02
+ * @version 1.1.0
  */
 #include "../board/boardInit.h"
 #include "../config/mcu2Types.h"
 #include "../protocol/hostProtocol.h"
-#include "../spi/spi1Slave.h"
+#include "../spi/spiSlave.h"
 #include "../ads1220/ads1220Port.h"
 
 int main(void)
@@ -17,17 +20,16 @@ int main(void)
     boardInit();
     ads1220PortInit();
     ads1220PortConfig();
-    spi1SlaveInit();
+    spiSlaveInit();
 
     for (;;)
     {
         wdiFeedToggle();
         furnaceTempC = ads1220PortReadTempC(&stat);
         hostBuildResponse(&response, furnaceTempC, stat);
-        spi1SlaveSetResponse(&response);
-        spi1SlavePoll();
+        spiSlaveSetResponse(&response);
 
-        if (spi1SlaveFrameComplete() != 0U)
+        if (spiSlaveFrameComplete() != 0U)
             ledComPulse();
 
         runLedHeartbeat();

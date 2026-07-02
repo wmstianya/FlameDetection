@@ -34,8 +34,9 @@ set HAL_SRC=^
 set MCU2_SRC=^
  %M2%/app/main.c^
  %M2%/protocol/hostProtocol.c^
- %M2%/spi/spi1Slave.c^
+ %M2%/spi/spiSlave.c^
  %M2%/ads1220/ads1220Port.c^
+ %M2%/ads1220/ads1220Reading.c^
  %M2%/board/boardInit.c^
  %M2%/utils/softSpiBitbang.c^
  %M2%/utils/tempCalib.c^

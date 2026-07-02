@@ -57,7 +57,7 @@
 ## 3. 集成骨架源码
 
 1. 将 `MCU2_G070/config`、`protocol`、`ads1220`、`board`、`app` 加入 Cube 工程。
-2. 在 `spi1Slave.c` 中调用 `hostProtocol` 组包。
+2. 在 `spiSlave.c` 中调用 `hostProtocol` 组包。
 3. 从主仓库复制/精简 `ADS1220.c` 中的寄存器常量到 `ads1220Port.c`（仅 PB 引脚版）。
 
 ## 4. 编译（GCC 占位 Makefile）

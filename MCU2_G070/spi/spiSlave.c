@@ -1,24 +1,34 @@
 /**
- * @file    spi1Slave.c
- * @brief   SPI1 slave Mode0; NSS falling edge starts 5-byte IT exchange
+ * @file    spiSlave.c
+ * @brief   SPI1 slave, Mode 0; NSS falling edge starts a 5-byte IT exchange.
+ * @author  Cursor Agent
+ * @date    2026-07-02
+ * @version 1.1.0  Renamed spi1Slave->spiSlave; removed unused poll hook.
  */
-#include "spi1Slave.h"
+#include "spiSlave.h"
 #include "../config/mcu2Pins.h"
 #include "../Inc/mcu2Main.h"
 
-static SPI_HandleTypeDef hspi1;
+static SPI_HandleTypeDef spiSlaveHandle;
 static HostFrame gTxFrame;
 static HostFrame gRxFrame;
 static HostCommand gLastCmd;
 static volatile uint8 gFrameDone = 0U;
 static volatile uint8 gTransferActive = 0U;
 
-SPI_HandleTypeDef *spi1SlaveGetHandle(void)
+/* Provisional temperature staged before the first ADS1220 reading. */
+#define SPI_SLAVE_SEED_TEMP_C   300U
+
+SPI_HandleTypeDef *spiSlaveGetHandle(void)
 {
-    return &hspi1;
+    return &spiSlaveHandle;
 }
 
-static void spi1SlaveGpioInit(void)
+/**
+ * @brief  Configure SCK/MISO/MOSI (PA5-PA7) as SPI1 alternate function.
+ * @return None.
+ */
+static void spiSlaveGpioInit(void)
 {
     GPIO_InitTypeDef gpio = {0};
 
@@ -33,25 +43,33 @@ static void spi1SlaveGpioInit(void)
     HAL_GPIO_Init(GPIOA, &gpio);
 }
 
-static void spi1SlavePeriphInit(void)
+/**
+ * @brief  Initialise the SPI1 peripheral as an 8-bit Mode 0 slave.
+ * @return None.
+ */
+static void spiSlavePeriphInit(void)
 {
-    hspi1.Instance = SPI1;
-    hspi1.Init.Mode = SPI_MODE_SLAVE;
-    hspi1.Init.Direction = SPI_DIRECTION_2LINES;
-    hspi1.Init.DataSize = SPI_DATASIZE_8BIT;
-    hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
-    hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
-    hspi1.Init.NSS = SPI_NSS_SOFT;
-    hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
-    hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
-    hspi1.Init.CRCPolynomial = 7U;
-    if (HAL_SPI_Init(&hspi1) != HAL_OK)
+    spiSlaveHandle.Instance = SPI1;
+    spiSlaveHandle.Init.Mode = SPI_MODE_SLAVE;
+    spiSlaveHandle.Init.Direction = SPI_DIRECTION_2LINES;
+    spiSlaveHandle.Init.DataSize = SPI_DATASIZE_8BIT;
+    spiSlaveHandle.Init.CLKPolarity = SPI_POLARITY_LOW;
+    spiSlaveHandle.Init.CLKPhase = SPI_PHASE_1EDGE;
+    spiSlaveHandle.Init.NSS = SPI_NSS_SOFT;
+    spiSlaveHandle.Init.FirstBit = SPI_FIRSTBIT_MSB;
+    spiSlaveHandle.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
+    spiSlaveHandle.Init.CRCPolynomial = 7U;
+    if (HAL_SPI_Init(&spiSlaveHandle) != HAL_OK)
         Error_Handler();
     HAL_NVIC_SetPriority(SPI1_IRQn, 0U, 0U);
     HAL_NVIC_EnableIRQ(SPI1_IRQn);
 }
 
-static void spi1SlaveNssExtiInit(void)
+/**
+ * @brief  Arm the NSS (PA4) falling-edge EXTI that starts each transaction.
+ * @return None.
+ */
+static void spiSlaveNssExtiInit(void)
 {
     GPIO_InitTypeDef gpio = {0};
 
@@ -63,36 +81,40 @@ static void spi1SlaveNssExtiInit(void)
     HAL_NVIC_EnableIRQ(EXTI4_15_IRQn);
 }
 
-static void spi1SlaveStartTransfer(void)
+/**
+ * @brief  Kick off an interrupt-driven 5-byte full-duplex exchange.
+ * @return None.
+ */
+static void spiSlaveStartTransfer(void)
 {
     if (gTransferActive != 0U)
         return;
-    if (hspi1.State != HAL_SPI_STATE_READY)
+    if (spiSlaveHandle.State != HAL_SPI_STATE_READY)
         return;
     gTransferActive = 1U;
-    if (HAL_SPI_TransmitReceive_IT(&hspi1, gTxFrame.bytes, gRxFrame.bytes,
+    if (HAL_SPI_TransmitReceive_IT(&spiSlaveHandle, gTxFrame.bytes, gRxFrame.bytes,
                                     HOST_FRAME_LEN) != HAL_OK)
         gTransferActive = 0U;
 }
 
-void spi1SlaveInit(void)
+void spiSlaveInit(void)
 {
-    hostBuildResponse(&gTxFrame, 300U, HOST_STAT_OK);
+    hostBuildResponse(&gTxFrame, SPI_SLAVE_SEED_TEMP_C, HOST_STAT_OK);
     gFrameDone = 0U;
     gTransferActive = 0U;
-    spi1SlaveGpioInit();
-    spi1SlavePeriphInit();
-    spi1SlaveNssExtiInit();
+    spiSlaveGpioInit();
+    spiSlavePeriphInit();
+    spiSlaveNssExtiInit();
 }
 
-void spi1SlaveSetResponse(const HostFrame *tx)
+void spiSlaveSetResponse(const HostFrame *tx)
 {
     if (tx == NULL)
         return;
     gTxFrame = *tx;
 }
 
-uint8 spi1SlaveFrameComplete(void)
+uint8 spiSlaveFrameComplete(void)
 {
     if (gFrameDone == 0U)
         return 0U;
@@ -100,16 +122,20 @@ uint8 spi1SlaveFrameComplete(void)
     return 1U;
 }
 
-void spi1SlavePoll(void)
+/**
+ * @brief  NSS falling-edge hook: begin the next transaction.
+ * @return None.
+ */
+static void spiSlaveOnNssFalling(void)
 {
+    spiSlaveStartTransfer();
 }
 
-void spi1SlaveOnNssFalling(void)
-{
-    spi1SlaveStartTransfer();
-}
-
-void spi1SlaveOnTransferComplete(void)
+/**
+ * @brief  Transfer-complete hook: parse the received command frame.
+ * @return None.
+ */
+static void spiSlaveOnTransferComplete(void)
 {
     HostFrame rx;
     uint8 i;
@@ -124,13 +150,13 @@ void spi1SlaveOnTransferComplete(void)
 void HAL_GPIO_EXTI_Falling_Callback(uint16_t GPIO_Pin)
 {
     if (GPIO_Pin == MCU2_SPI1_CS_PIN)
-        spi1SlaveOnNssFalling();
+        spiSlaveOnNssFalling();
 }
 
 void HAL_SPI_TxRxCpltCallback(SPI_HandleTypeDef *hspi)
 {
     if (hspi->Instance == SPI1)
-        spi1SlaveOnTransferComplete();
+        spiSlaveOnTransferComplete();
 }
 
 void HAL_SPI_ErrorCallback(SPI_HandleTypeDef *hspi)

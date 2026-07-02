@@ -22,8 +22,8 @@ MCU2_G070/
 │   ├── hostProtocol.h        ← 5 字节帧 API
 │   └── hostProtocol.c        ← 组包/解析（与主芯片一致）
 ├── spi/
-│   ├── spi1Slave.h           ← SPI1 从机驱动接口
-│   └── spi1Slave.c           ← 占位：Cube HAL 实现放此
+│   ├── spiSlave.h            ← SPI1 从机驱动接口
+│   └── spiSlave.c            ← Cube HAL 从机实现
 ├── ads1220/
 │   ├── ads1220Port.h         ← 位 bang ADS1220 接口
 │   └── ads1220Port.c         ← 配置 + 读数 + 温度换算
@@ -40,7 +40,7 @@ MCU2_G070/
 ```
 main.c
   ├── boardInit
-  ├── spi1Slave ──► hostProtocol
+  ├── spiSlave ──► hostProtocol
   ├── ads1220Port
   └── mcu2Pins
 ```
@@ -78,13 +78,14 @@ Temp = ADS1220_IDAC_500 | 0x50;
 Temp = ADS1220_IDAC1_AIN2 | ADS1220_IDAC2_AIN3;
 ```
 
-### 4.3 `spi1Slave` — G070 独有
+### 4.3 `spiSlave` — G070 独有
 
 | API | 行为 |
 |-----|------|
-| `spi1SlaveInit()` | SPI1 Slave Mode0, PA4–7 |
-| `spi1SlaveOnExchange()` | NSS 下降沿起，5 字节 ISR 交换 |
-| `spi1SlaveSetResponse()` | 写入下一帧 TX 缓冲 |
+| `spiSlaveInit()` | SPI1 Slave Mode0, PA4–7 |
+| `spiSlaveGetHandle()` | 供 SPI1_IRQHandler 取 HAL 句柄 |
+| `spiSlaveSetResponse()` | 写入下一帧 TX 缓冲 |
+| `spiSlaveFrameComplete()` | 读取并清除“帧完成”标志 |
 
 主机侧 **无** 对应模块（主机为 PE7–10 位 bang 主模式）。
 
@@ -96,16 +97,16 @@ int main(void)
     boardInit();
     ads1220PortInit();
     ads1220PortConfig();
-    spi1SlaveInit();
+    spiSlaveInit();
 
     for (;;)
     {
         wdiFeedToggle();                    /* PB0 ~500ms */
         furnaceTempC = ads1220PortReadTempC();
         hostBuildResponse(&txFrame, furnaceTempC, HOST_STAT_OK);
-        spi1SlaveSetResponse(&txFrame);
+        spiSlaveSetResponse(&txFrame);
 
-        if (spi1SlaveFrameComplete())
+        if (spiSlaveFrameComplete())
             ledComPulse();                  /* PB1 */
         runLedHeartbeat();                  /* PD3 */
     }
@@ -126,7 +127,7 @@ int main(void)
 
 - [ ] `system_stm32g0xx.c` / `startup_stm32g070xx.s`
 - [ ] `stm32g0xx_hal_msp.c` — SPI1 GPIO AF
-- [ ] `spi1Slave.c` — HAL_SPI 从机 + NSS  EXTI
+- [ ] `spiSlave.c` — HAL_SPI 从机 + NSS  EXTI
 - [ ] `ads1220Port.c` — 从主工程精简位 bang 时序
 - [ ] `STM32G070CBTx_FLASH.ld`
 - [ ] OpenOCD / ST-Link 烧录脚本

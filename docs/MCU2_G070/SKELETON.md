@@ -26,7 +26,7 @@ UART/HARDWARE/led/       ← 主芯片 SPI 主机实现
 | `protocol/hostProtocol.c` | `bsp_led.c` | `TxData[]` / `ReciveData[]` |
 | `ads1220/ads1220Port.c` | `ADS1220.c` | `ADS1220Config()` |
 | `config/mcu2Pins.h` | `soft_spi_pins.h` | PE7–10 ↔ PA4–7 |
-| `spi/spi1Slave.c` | `SPI_RW_Data_MODE0` | Mode0 从机侧 |
+| `spi/spiSlave.c` | `SPI_RW_Data_MODE0` | Mode0 从机侧 |
 
 ## 最小联调（T0）
 
