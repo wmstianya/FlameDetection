@@ -26,12 +26,18 @@ MCU2_G070/
 │   └── spiSlave.c            ← Cube HAL 从机实现
 ├── ads1220/
 │   ├── ads1220Port.h         ← 位 bang ADS1220 接口
-│   └── ads1220Port.c         ← 配置 + 读数 + 温度换算
+│   ├── ads1220Port.c         ← 配置 + 读数（含滤波+断线策略）
+│   ├── ads1220Reading.h/.c   ← A1 断线/超时判定（纯逻辑，可单测）
+├── utils/
+│   ├── tempCalib.h/.c        ← raw→0.1℃ 查表 / 0.1℃→整数℃
+│   ├── tempFilter.h/.c       ← 21 点滑动平均（采集路径）
+│   └── softSpiBitbang.h/.c   ← ADS1220 位 bang SPI
 ├── board/
 │   ├── boardInit.h
 │   └── boardInit.c           ← 时钟/GPIO/WDI/LED
 ├── app/
 │   └── main.c                ← 主循环
+├── tests/                    ← Unity 主机单元测试
 └── docs/                     ← 符号链接 → ../docs/MCU2_G070/
 ```
 
@@ -41,9 +47,13 @@ MCU2_G070/
 main.c
   ├── boardInit
   ├── spiSlave ──► hostProtocol
-  ├── ads1220Port
+  ├── ads1220Port ──► ads1220Reading, tempCalib, tempFilter, softSpiBitbang
   └── mcu2Pins
 ```
+
+> **采集与通讯解耦**：`ads1220Port` 在主循环里跟随 ADS1220 连续转换（~20 SPS）采样，
+> 每个有效样本推入 `tempFilter`（21 点滑动平均，作用于 0.1℃ 查表值，然后 −2.5℃ 修正 → 整数℃）。
+> SPI 事务由主机 1 Hz NSS 触发，ISR 只读已备好的温度值——两条速率互不相同，滤波在采集侧完成。
 
 ## 4. 模块接口（与主芯片映射）
 

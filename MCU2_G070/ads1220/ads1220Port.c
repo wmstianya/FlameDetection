@@ -13,6 +13,7 @@
 #include "../protocol/hostProtocol.h"
 #include "../utils/softSpiBitbang.h"
 #include "../utils/tempCalib.h"
+#include "../utils/tempFilter.h"
 #include "../Inc/mcu2Main.h"    /* boardGetMsTick() */
 
 /* ADS1220 command set (datasheet 8.5.3). */
@@ -85,6 +86,7 @@ typedef char ads1220Reg3Aligned[(ADS1220_REG3_VALUE == 0x70U) ? 1 : -1];
 #define ADS1220_RESET_SETTLE_MS     2U
 
 static Ads1220Reading gReading;
+static TempFilter gTempFilter;
 
 /**
  * @brief  Write one ADS1220 configuration register.
@@ -118,6 +120,7 @@ void ads1220PortInit(void)
     softSpiBitbangInit();
     softSpiBitbangCsSet(0U);
     ads1220ReadingInit(&gReading, ADS1220_SEED_TEMP_C);
+    tempFilterInit(&gTempFilter);
 }
 
 void ads1220PortConfig(void)
@@ -166,7 +169,15 @@ uint16 ads1220PortReadTempC(uint8 *statOut)
 
     portStat = ads1220PortTryReadRaw(&raw);
     if (portStat == ADS1220_PORT_OK)
-        convTempC = tempCalibRawToTempC(raw, &convValid);
+    {
+        /* Acquisition path (~20 SPS): filter the 0.1 deg C table value before
+         * the trim/reduction, then reduce to whole degrees. The filter is only
+         * advanced on a fresh sample, so it tracks the ADS1220 conversion rate
+         * and is independent of the 1 Hz host SPI polling. */
+        uint16 rawTenthC = tempCalibRawToTenthC(raw);
+        uint16 filteredTenthC = tempFilterPush(&gTempFilter, rawTenthC);
+        convTempC = tempCalibTenthToTempC(filteredTenthC, &convValid);
+    }
 
     return ads1220ReadingResolve(&gReading, portStat, convTempC, convValid,
                                  boardGetMsTick(), statOut);

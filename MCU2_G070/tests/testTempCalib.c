@@ -53,6 +53,35 @@ static void test_null_readok_pointer_is_safe(void)
     TEST_PASS();
 }
 
+/* Stage 2 (tenth -> degrees) behaviour: trim, reduce, clamp, disconnect. */
+static void test_tenth_to_temp_stages(void)
+{
+    uint8 ok = 0U;
+    TEST_ASSERT_EQUAL_UINT16(5U, tempCalibTenthToTempC(50U, &ok));   /* no trim <10C */
+    TEST_ASSERT_EQUAL_UINT8(1U, ok);
+    TEST_ASSERT_EQUAL_UINT16(202U, tempCalibTenthToTempC(2050U, &ok)); /* 2050-25=2025 ->202 */
+    TEST_ASSERT_EQUAL_UINT8(1U, ok);
+    TEST_ASSERT_EQUAL_UINT16(HOST_TEMP_CLAMP_MAX, tempCalibTenthToTempC(4000U, &ok)); /* >390 clamp */
+    TEST_ASSERT_EQUAL_UINT8(1U, ok);
+    TEST_ASSERT_EQUAL_UINT16(HOST_TEMP_DISCONNECT, tempCalibTenthToTempC(9999U, &ok)); /* disconnect */
+    TEST_ASSERT_EQUAL_UINT8(0U, ok);
+}
+
+/* The convenience wrapper equals stage1 |> stage2 exactly. */
+static void test_raw_wrapper_matches_split(void)
+{
+    int32_t raws[] = {0, 4200000, 5000000, 6000000, 8388607};
+    unsigned i;
+    for (i = 0U; i < sizeof(raws) / sizeof(raws[0]); i++)
+    {
+        uint8 okA = 0U, okB = 0U;
+        uint16 a = tempCalibRawToTempC(raws[i], &okA);
+        uint16 b = tempCalibTenthToTempC(tempCalibRawToTenthC(raws[i]), &okB);
+        TEST_ASSERT_EQUAL_UINT16(b, a);
+        TEST_ASSERT_EQUAL_UINT8(okB, okA);
+    }
+}
+
 int main(void)
 {
     UNITY_BEGIN();
@@ -61,5 +90,7 @@ int main(void)
     RUN_TEST(test_negative_raw_treated_as_disconnect);
     RUN_TEST(test_overrange_reports_disconnect);
     RUN_TEST(test_null_readok_pointer_is_safe);
+    RUN_TEST(test_tenth_to_temp_stages);
+    RUN_TEST(test_raw_wrapper_matches_split);
     return UNITY_END();
 }

@@ -40,6 +40,7 @@ set MCU2_SRC=^
  %M2%/board/boardInit.c^
  %M2%/utils/softSpiBitbang.c^
  %M2%/utils/tempCalib.c^
+ %M2%/utils/tempFilter.c^
  %M2%/Src/mcu2Main.c^
  %M2%/Src/stm32g0xx_it.c^
  %M2%/Src/stm32g0xx_hal_msp.c^

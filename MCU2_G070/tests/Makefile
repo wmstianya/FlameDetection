@@ -13,12 +13,14 @@ BUILD := $(HERE)/build
 
 INC := -I$(HERE)/unity -I$(M2)/config -I$(M2)/protocol -I$(M2)/utils -I$(M2)/ads1220
 
-BINS := $(BUILD)/testHostProtocol $(BUILD)/testTempCalib $(BUILD)/testAds1220Reading
+BINS := $(BUILD)/testHostProtocol $(BUILD)/testTempCalib $(BUILD)/testTempFilter \
+        $(BUILD)/testAds1220Reading
 
 .PHONY: test clean
 test: $(BINS)
 	@echo "== hostProtocol ==" && $(BUILD)/testHostProtocol
 	@echo "== tempCalib =="     && $(BUILD)/testTempCalib
+	@echo "== tempFilter =="    && $(BUILD)/testTempFilter
 	@echo "== ads1220Reading ==" && $(BUILD)/testAds1220Reading
 	@echo "ALL TEST SUITES PASSED"
 
@@ -29,6 +31,9 @@ $(BUILD)/testHostProtocol: $(HERE)/testHostProtocol.c $(M2)/protocol/hostProtoco
 	$(CC) $(CFLAGS) $(INC) $^ -o $@
 
 $(BUILD)/testTempCalib: $(HERE)/testTempCalib.c $(M2)/utils/tempCalib.c $(UNITY) | $(BUILD)
+	$(CC) $(CFLAGS) $(INC) $^ -o $@
+
+$(BUILD)/testTempFilter: $(HERE)/testTempFilter.c $(M2)/utils/tempFilter.c $(UNITY) | $(BUILD)
 	$(CC) $(CFLAGS) $(INC) $^ -o $@
 
 $(BUILD)/testAds1220Reading: $(HERE)/testAds1220Reading.c $(M2)/ads1220/ads1220Reading.c $(UNITY) | $(BUILD)

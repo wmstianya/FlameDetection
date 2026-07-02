@@ -119,12 +119,10 @@ static uint16 tempCalibFromQuantized(uint16 value)
     return CALIB_OVERRANGE_TENTHC;
 }
 
-uint16 tempCalibRawToTempC(int32_t raw, uint8 *readOk)
+uint16 tempCalibRawToTenthC(int32_t raw)
 {
     float scaled;
     uint32_t quantized;
-    uint16 lookupTenthC;
-    uint16 tempC;
 
     if (raw < 0)
         raw = 0;
@@ -133,23 +131,34 @@ uint16 tempCalibRawToTempC(int32_t raw, uint8 *readOk)
     scaled = scaled / ADC_PGA_GAIN / ADC_FRONTEND_DIVIDER;
     quantized = (uint32_t)(scaled * CALIB_CODE_CENTI_SCALE);
 
-    lookupTenthC = tempCalibFromQuantized((uint16)quantized);
+    return tempCalibFromQuantized((uint16)quantized);
+}
+
+uint16 tempCalibTenthToTempC(uint16 tenthC, uint8 *readOk)
+{
+    uint16 tempC;
+
     /* Empirical calibration trim carried over from the master bsp_adc.c: above
      * 10.0 deg C the table reads ~2.5 deg C high, so subtract the fixed trim.
      * Do NOT change without re-characterising against a reference thermometer. */
-    if (lookupTenthC > CALIB_OFFSET_GATE_TENTHC)
-        lookupTenthC = (uint16)(lookupTenthC - CALIB_OFFSET_TRIM_TENTHC);
+    if (tenthC > CALIB_OFFSET_GATE_TENTHC)
+        tenthC = (uint16)(tenthC - CALIB_OFFSET_TRIM_TENTHC);
 
-    if (lookupTenthC > TEMP_TENTHC_DISCONNECT)
+    if (tenthC > TEMP_TENTHC_DISCONNECT)
     {
         if (readOk != NULL)
             *readOk = 0U;
         return HOST_TEMP_DISCONNECT;
     }
-    tempC = (uint16)(lookupTenthC / TENTHC_PER_DEGREE);
+    tempC = (uint16)(tenthC / TENTHC_PER_DEGREE);
     if (tempC > TEMP_VALID_MAX_C)
         tempC = HOST_TEMP_CLAMP_MAX;
     if (readOk != NULL)
         *readOk = 1U;
     return tempC;
+}
+
+uint16 tempCalibRawToTempC(int32_t raw, uint8 *readOk)
+{
+    return tempCalibTenthToTempC(tempCalibRawToTenthC(raw), readOk);
 }
