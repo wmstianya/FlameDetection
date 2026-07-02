@@ -65,18 +65,16 @@ main.c
 | `ads1220PortReadRaw()` | `ADS1220TryReadData()` | 24 bit 有符号 |
 | `ads1220PortReadTempC()` | （副芯片独有） | raw → `Protect_WenDu` uint16 °C |
 
-**`ADS1220Config()` 寄存器（主芯片现值）：**
+**`ADS1220Config()` 寄存器（字节级对齐主机，见 OVERVIEW.md 3.2/4）：**
 
-```c
-// Reg0: MUX AIN1/AIN0, GAIN x16
-Temp = ADS1220_MUX_1_0 | ADS1220_GAIN_16;
-// Reg1: 连续转换
-Temp = ADS1220_CC;
-// Reg2: 外部基准, 50/60Hz 抑制, IDAC 500µA
-Temp = ADS1220_IDAC_500 | 0x50;
-// Reg3: IDAC1→AIN2, IDAC2→AIN3
-Temp = ADS1220_IDAC1_AIN2 | ADS1220_IDAC2_AIN3;
-```
+| Reg | 字节 | 组成 |
+|-----|------|------|
+| 0 | `0x68` | MUX AIN1–AIN0 (0x60) \| PGA ×16 (0x08) |
+| 1 | `0x04` | 连续转换 `ADS1220_CC`（其余默认：20 SPS、Normal） |
+| 2 | `0x55` | 外部基准 (0x40) \| 50/60Hz 双抑制 (0x10) \| IDAC 500µA (0x05) |
+| 3 | `0x70` | I1MUX→AIN2 (0x60) \| I2MUX→AIN3 (0x10) |
+
+> `ads1220Port.c` 用 `_Aligned` 编译期断言锁定这四个字节，配置漂移即编译失败。
 
 ### 4.3 `spiSlave` — G070 独有
 

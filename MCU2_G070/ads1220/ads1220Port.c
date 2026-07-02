@@ -31,33 +31,48 @@
 #define ADS1220_REG_CONFIG2         2U
 #define ADS1220_REG_CONFIG3         3U
 
-/* Reg0 fields: input MUX and PGA gain (values carried over from D380 master). */
-#define ADS1220_MUX_1_0             0x30U
+/*
+ * Register values are byte-aligned with the D380 master ADS1220Config()
+ * (docs OVERVIEW.md 3.2/4): Reg0=0x68, Reg1=0x04, Reg2=0x55, Reg3=0x70.
+ * The compile-time checks at the end of this block lock that alignment.
+ */
+
+/* Reg0 = 0x68: MUX AIN1-AIN0 (bits[7:4]=0110=0x60) | PGA gain x16 (bits[3:1]=100). */
+#define ADS1220_MUX_AIN1_AIN0       0x60U
 #define ADS1220_GAIN_16             0x08U
 
-/* Reg1 field: continuous conversion mode (CM = 1). */
+/* Reg1 = 0x04: continuous conversion (CM=1); DR=20 SPS, Normal mode (defaults). */
 #define ADS1220_CC                  0x04U
 
 /*
- * Reg2 fields (datasheet Table: [7:6]=VREF, [5:4]=50/60Hz FIR, [2:0]=IDAC).
- * C1 FIX: the IDAC current lives in bits [2:0]; 500 uA = 0b101 = 0x05. The
- * previous value 0x10 landed in the [5:4] filter field, so the emitted Reg2
- * (0x50) had IDAC = 000 (OFF) and the RTD excitation never flowed. The value
- * now emits 0x55 to match the documented intent "external VREF, 50/60Hz, IDAC
- * 500 uA". VERIFY the master's ADS1220_IDAC_500 macro is likewise 0x05.
+ * Reg2 = 0x55: [7:6]=VREF, [5:4]=50/60Hz FIR, [2:0]=IDAC current. The IDAC
+ * current is 0b101=0x05 (500 uA) in bits[2:0] -- NOT 0x10, which is the 50/60Hz
+ * field. The RTD probe requires 500 uA excitation; must not be left OFF.
  */
 #define ADS1220_VREF_EXTERNAL       0x40U   /* external REFP0/REFN0            */
 #define ADS1220_FILTER_50_60HZ      0x10U   /* simultaneous 50/60Hz rejection  */
 #define ADS1220_IDAC_500            0x05U   /* IDAC current = 500 uA (bits[2:0])*/
 
 /*
- * Reg3 fields: IDAC1/IDAC2 output routing (kept byte-identical to the master).
- * NOTE: these macro names do not match the datasheet I1MUX/I2MUX bit fields;
- * left unchanged to preserve parity with the master's known configuration.
- * VERIFY against the master ADS1220.c before altering the routing.
+ * Reg3 = 0x70: [7:5]=I1MUX, [4:2]=I2MUX. Route IDAC1 -> AIN2 (011 in [7:5]=0x60)
+ * and IDAC2 -> AIN3 (100 in [4:2]=0x10). Both sources must be routed; the older
+ * 0x20/0x40 literals put both codes in the I1MUX field and left IDAC2 disabled.
  */
-#define ADS1220_IDAC1_AIN2          0x20U
-#define ADS1220_IDAC2_AIN3          0x40U
+#define ADS1220_IDAC1_AIN2          0x60U
+#define ADS1220_IDAC2_AIN3          0x10U
+
+/* Composed configuration bytes (must equal the master's 0x68/0x04/0x55/0x70). */
+#define ADS1220_REG0_VALUE  ((uint8_t)(ADS1220_MUX_AIN1_AIN0 | ADS1220_GAIN_16))
+#define ADS1220_REG1_VALUE  ((uint8_t)(ADS1220_CC))
+#define ADS1220_REG2_VALUE  ((uint8_t)(ADS1220_VREF_EXTERNAL | ADS1220_FILTER_50_60HZ | \
+                                       ADS1220_IDAC_500))
+#define ADS1220_REG3_VALUE  ((uint8_t)(ADS1220_IDAC1_AIN2 | ADS1220_IDAC2_AIN3))
+
+/* Fail the build if the configuration drifts from the master's ADS1220 bytes. */
+typedef char ads1220Reg0Aligned[(ADS1220_REG0_VALUE == 0x68U) ? 1 : -1];
+typedef char ads1220Reg1Aligned[(ADS1220_REG1_VALUE == 0x04U) ? 1 : -1];
+typedef char ads1220Reg2Aligned[(ADS1220_REG2_VALUE == 0x55U) ? 1 : -1];
+typedef char ads1220Reg3Aligned[(ADS1220_REG3_VALUE == 0x70U) ? 1 : -1];
 
 /* 24-bit two's-complement sign handling for the conversion result. */
 #define ADS1220_SIGN_BIT_24         0x00800000
@@ -112,13 +127,10 @@ void ads1220PortConfig(void)
     softSpiBitbangCsSet(0U);
     HAL_Delay(ADS1220_RESET_SETTLE_MS);
 
-    ads1220WriteReg(ADS1220_REG_CONFIG0, (uint8_t)(ADS1220_MUX_1_0 | ADS1220_GAIN_16));
-    ads1220WriteReg(ADS1220_REG_CONFIG1, ADS1220_CC);
-    ads1220WriteReg(ADS1220_REG_CONFIG2,
-                    (uint8_t)(ADS1220_VREF_EXTERNAL | ADS1220_FILTER_50_60HZ |
-                              ADS1220_IDAC_500));
-    ads1220WriteReg(ADS1220_REG_CONFIG3,
-                    (uint8_t)(ADS1220_IDAC1_AIN2 | ADS1220_IDAC2_AIN3));
+    ads1220WriteReg(ADS1220_REG_CONFIG0, ADS1220_REG0_VALUE);
+    ads1220WriteReg(ADS1220_REG_CONFIG1, ADS1220_REG1_VALUE);
+    ads1220WriteReg(ADS1220_REG_CONFIG2, ADS1220_REG2_VALUE);
+    ads1220WriteReg(ADS1220_REG_CONFIG3, ADS1220_REG3_VALUE);
 
     softSpiBitbangCsSet(1U);
     softSpiBitbangSendByte(ADS1220_CMD_SYNC);
